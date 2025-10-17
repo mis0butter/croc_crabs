@@ -101,17 +101,14 @@ xRunCost = crocoddyl.CostModelResidual(state, xRunActivation, xRunResidual)
 dt = 1e-2
 
 runningCostModel = crocoddyl.CostModelSum(state, nu)  
-terminalCostModel = crocoddyl.CostModelSum(state, nu) 
-
 runningCostModel.addCost("uReg", uRegCost, 1e-4 / dt)
 runningCostModel.addCost("xGoal", xGoalCost, 1e-5 / dt)
-terminalCostModel.addCost("xGoal", xGoalCost, 100.0)
-            # was 100
 runningCostModel.addCost("xGoal", xRunCost, 1.0)           # was 1e-5/dt
-terminalCostModel.addCost("xGoal", xGoalCost, 1e4)         # was 100.0
+# runningCostModel.addCost("uReg", uRegCost, 1e-6 / dt)      # was 1e-4/dt
 
-# 3) Make torques less penalized
-runningCostModel.addCost("uReg", uRegCost, 1e-6 / dt)      # was 1e-4/dt
+terminalCostModel = crocoddyl.CostModelSum(state, nu) 
+# terminalCostModel.addCost("xGoal", xGoalCost, 100.0)            # was 100
+terminalCostModel.addCost("xGoal", xGoalCost, 1e4)         # was 100.0
 
 runningModel = crocoddyl.IntegratedActionModelEuler(
     crocoddyl.DifferentialActionModelFreeInvDynamics(
