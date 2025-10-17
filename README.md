@@ -4,11 +4,11 @@ Minimal setup to optimize and visualize motions for the crab robot using Crocodd
 
 ## Repository layout
 
-- `scripts/` – runnable examples (e.g., `crabs_invdyn.py`, `visualize_crabs.py`).
-- `hcrl_crab_robot/` – robot description (URDF + meshes). Managed by Gitman.
-- `crocoddyl/` – upstream Crocoddyl sources (read-only for running examples).
-- `croc_crabs.yaml` – conda environment.
-- `gitman.yaml` – external dependency spec (Gitman).
+- `scripts/` – runnable examples, e.g. `crabs_invdyn.py`, `visualize_crabs.py` 
+- `hcrl_crab_robot/` – robot description (URDF + meshes). Managed by Gitman
+- `crocoddyl/` – upstream Crocoddyl sources. Intended to be read-only for learning and examples 
+- `croc_crabs.yaml` – conda environment 
+- `gitman.yaml` – Gitman-managed external repositories  
 
 ## 1) Create the environment
 
@@ -21,7 +21,7 @@ conda activate croc_crabs
 Notes
 - The env includes: python 3.9, numpy, matplotlib, pinocchio, crocoddyl, meshcat, and gitman (via pip).
 
-## 2) Fetch external dependencies (Gitman)
+## 2) Fetch external repositories with Gitman 
 
 This repo uses Gitman to fetch the robot description (and optionally other repos).
 
@@ -52,12 +52,11 @@ python scripts/crabs_invdyn.py plot display
 Tips
 - Meshcat opens a browser window automatically. If a window doesn’t appear, open the printed URL manually. 
 
-```
 
 ## Troubleshooting
 
-- "ModuleNotFoundError: matplotlib": install it into the active env:
-  `conda install -c conda-forge matplotlib` 
-- If `gitman` is not found, ensure the env is active or install with: `pip install gitman`.
+- `ModuleNotFoundError: matplotlib`: install it into the active env:
+```conda install -c conda-forge matplotlib``` 
+- If `gitman` is not found, ensure the env is active or install with `pip install gitman`.
  
 
