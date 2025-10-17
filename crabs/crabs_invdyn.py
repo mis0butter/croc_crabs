@@ -7,6 +7,7 @@ import time
 import numpy as np
 import pinocchio
 from pinocchio.visualize import MeshcatVisualizer 
+from pinocchio import JointModelFreeFlyer
 
 import crocoddyl
 
@@ -27,7 +28,7 @@ urdf_path = os.path.join(model_dir, "crab.urdf")
 package_dirs = [model_dir]
 
 # Load model + visuals
-model, collision_model, visual_model = pinocchio.buildModelsFromUrdf(urdf_path, package_dirs)
+model, collision_model, visual_model = pinocchio.buildModelsFromUrdf(urdf_path, package_dirs, JointModelFreeFlyer())
 
 # Create data
 data = model.createData()
@@ -63,7 +64,11 @@ xRegCost = crocoddyl.CostModelResidual(state, xActivation, xResidual)
 uRegCost = crocoddyl.CostModelResidual(state, uResidual)
 
 # Define a goal state 
-xGoal = np.zeros(state.nx)
+# xGoal = np.zeros(state.nx)
+xGoal = state.zero() 
+
+# Define the activation model for the goal state
+xGoalActivation = crocoddyl.ActivationModelWeightedQuad(np.ones(state.ndx))
 
 # Define the residual model for the goal state
 xGoalResidual = crocoddyl.ResidualModelState(state, xGoal, nu)
@@ -71,8 +76,8 @@ xGoalResidual = crocoddyl.ResidualModelState(state, xGoal, nu)
 # Define the cost model for the goal state
 xPendCost = crocoddyl.CostModelResidual(
     state, 
-    crocoddyl.ActivationModelWeightedQuad(np.array([1.0] * state.nx)), 
-    crocoddyl.ResidualModelState(state, xGoal, nu)
+    xGoalActivation, 
+    xGoalResidual
 )
 
 dt = 1e-2
@@ -100,7 +105,8 @@ terminalModel = crocoddyl.IntegratedActionModelEuler(
 
 T = 100
 # Initialize with a reasonable starting configuration for the crab robot
-x0 = np.zeros(state.nx)
+# x0 = np.zeros(state.nx)
+x0 = state.zero() 
 problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
 solver = crocoddyl.SolverIntro(problem)
 
