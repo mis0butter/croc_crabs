@@ -8,3 +8,6 @@ dependencies:
   - pinocchio
   - crocoddyl
   - meshcat 
+  - pip 
+  - pip: 
+    - gitman 
