@@ -7,7 +7,7 @@ dependencies:
   - matplotlib
   - pinocchio
   - crocoddyl
-  - meshcat 
   - pip 
   - pip: 
+    - meshcat
     - gitman 
