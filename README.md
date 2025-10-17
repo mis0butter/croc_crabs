@@ -27,14 +27,7 @@ This repo uses Gitman to fetch the robot description (and optionally other repos
 
 ```bash
 # From repo root
-gitman install -c gitman.yaml      # clones into ./hcrl_crab_robot
-# (later) lock exact SHAs for reproducibility
-gitman lock --all -c gitman.yaml
-```
-
-If you update dependencies in `gitman.yaml`, run:
-```bash
-gitman update -c gitman.yaml
+gitman update 
 ```
 
 ## 3) Run an example
@@ -47,6 +40,7 @@ and visualizes it in Meshcat and/or plots convergence curves.
 python scripts/crabs_invdyn.py display
 ```
 - Plots (matplotlib):
+**Warning**: plots are in development and may be unstable.
 ```bash
 python scripts/crabs_invdyn.py plot
 ```
@@ -56,27 +50,14 @@ python scripts/crabs_invdyn.py plot display
 ```
 
 Tips
-- Meshcat opens a browser window automatically. If a window doesn’t appear, open the printed URL manually.
-- You can also enable via environment variables: `CROCODDYL_DISPLAY=1` and/or `CROCODDYL_PLOT=1`.
+- Meshcat opens a browser window automatically. If a window doesn’t appear, open the printed URL manually. 
 
-## 4) Optional: verify collision geometry in Meshcat
-
-```bash
-python scripts/visualize_crabs.py
 ```
 
 ## Troubleshooting
 
 - "ModuleNotFoundError: matplotlib": install it into the active env:
-  `conda install -c conda-forge matplotlib`
-- Meshcat shows only a single collision object: ensure you’re running the provided scripts (they promote collisions to visuals) and clear the scene between runs.
+  `conda install -c conda-forge matplotlib` 
 - If `gitman` is not found, ensure the env is active or install with: `pip install gitman`.
-
-## Git hygiene
-
-When using Gitman, commit only `gitman.yaml` and `gitman.lock`. Ignore vendored folders:
-```
-hcrl_crab_robot/
-crabs/
-.gitman/
-```
+ 
+ 
