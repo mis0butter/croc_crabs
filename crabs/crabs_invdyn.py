@@ -43,7 +43,7 @@ state = crocoddyl.StateMultibody(model)
 actuation = crocoddyl.ActuationModelFloatingBase(state)
 
 # ==================================================================== 
-# Defining the cost model
+# Setting up the cost model
 # ==================================================================== 
 
 nu = state.nv # number of controls
@@ -66,12 +66,32 @@ uResidual = crocoddyl.ResidualModelJointEffort(
 xRegCost = crocoddyl.CostModelResidual(state, xActivation, xResidual)
 uRegCost = crocoddyl.CostModelResidual(state, uResidual)
 
-# Define a goal state 
-# xGoal = np.zeros(state.nx)
-xGoal = state.zero() 
+# ==================================================================== 
+# Defining the terminal cost model
+# ==================================================================== 
 
-# Define the activation model for the goal state
-xGoalActivation = crocoddyl.ActivationModelWeightedQuad(np.ones(state.ndx))
+# Target: rotate base_link by +90 deg about z (yaw)
+theta = np.pi / 2.0
+q_goal = pinocchio.neutral(model)          # size model.nq
+# q layout for free-flyer: [x y z  qx qy qz qw]
+q_goal[3:7] = np.array([0.0, np.sin(theta/2.0), 0.0, np.cos(theta/2.0)])
+
+# Define the goal state  
+xGoal = state.zero()
+xGoal[:model.nq] = q_goal                  # set desired configuration; velocities zero
+
+# 1) Weights: strongly weight base orientation error
+w = np.ones(state.ndx)
+w[3:6] = 1e3                 # base orientation tangent (within dq)
+w[state.nv+3:state.nv+6] = 10 # (optional) base angular velocity to zero at final
+
+# Running goal (orientation only)
+xRunActivation = crocoddyl.ActivationModelWeightedQuad(w)
+xRunResidual = crocoddyl.ResidualModelState(state, xGoal, nu)
+xRunCost = crocoddyl.CostModelResidual(state, xRunActivation, xRunResidual)
+
+# Terminal goal (same weights, usually stronger)
+xGoalActivation = crocoddyl.ActivationModelWeightedQuad(w)
 
 # Define the residual model for the goal state
 xGoalResidual = crocoddyl.ResidualModelState(state, xGoal, nu)
@@ -101,6 +121,12 @@ terminalModel = crocoddyl.IntegratedActionModelEuler(
     ),
     dt,
 )
+            # was 100
+runningCostModel.addCost("xGoal", xRunCost, 1.0)           # was 1e-5/dt
+terminalCostModel.addCost("xGoal", xPendCost, 1e4)         # was 100.0
+
+# 3) Make torques less penalized
+runningCostModel.addCost("uReg", uRegCost, 1e-6 / dt)      # was 1e-4/dt
 
 # ==================================================================== 
 # Creating the shooting problem and the solver
