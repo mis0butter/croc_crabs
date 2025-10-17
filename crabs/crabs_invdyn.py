@@ -30,6 +30,9 @@ package_dirs = [model_dir]
 # Load model + visuals
 model, collision_model, visual_model = pinocchio.buildModelsFromUrdf(urdf_path, package_dirs, JointModelFreeFlyer())
 
+# turn off gravity!  
+model.gravity.linear[:] = 0.0 
+
 # Create data
 data = model.createData()
 
