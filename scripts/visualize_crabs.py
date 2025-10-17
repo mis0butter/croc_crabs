@@ -21,7 +21,7 @@ WITHPLOT = "plot" in sys.argv or "CROCODDYL_PLOT" in os.environ
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 # Define paths
-model_dir = os.path.join(os.path.dirname(__file__), "hcrl_crab_robot")
+model_dir = os.path.join(os.path.dirname(__file__), "..", "hcrl_crab_robot")
 urdf_path = os.path.join(model_dir, "crab.urdf")
 
 # Optional: add package directory for meshes

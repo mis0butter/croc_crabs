@@ -1,0 +1,8 @@
+location: .  # checkout paths are relative to repo root
+sources:
+
+  - name: hcrl_crab_robot
+    type: git
+    repo: git@github.com:Creampelt/hcrl_crab_robot.git
+    rev: main
+    path: crabs/  # clones into ./crabs/hcrl_crab_robot

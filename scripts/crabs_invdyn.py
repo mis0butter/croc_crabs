@@ -21,7 +21,7 @@ WITHPLOT = "plot" in sys.argv or "CROCODDYL_PLOT" in os.environ
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 # Define paths
-model_dir = os.path.join(os.path.dirname(__file__), "hcrl_crab_robot")
+model_dir = os.path.join(os.path.dirname(__file__), "..", "hcrl_crab_robot")
 urdf_path = os.path.join(model_dir, "crab.urdf")
 
 # Optional: add package directory for meshes
@@ -45,8 +45,8 @@ actuation = crocoddyl.ActuationModelFloatingBase(state)
 nu = state.nv # number of controls
 # nu = actuation.nu 
 
-# Target: rotate base_link by +90 deg about z (yaw)
-theta = np.pi / 2.0
+# Define target 
+theta = np.pi 
 q_goal = pinocchio.neutral(model)          # size model.nq
 
 # q layout for free-flyer: [x y z  qx qy qz qw]
@@ -101,13 +101,11 @@ xRunCost = crocoddyl.CostModelResidual(state, xRunActivation, xRunResidual)
 dt = 1e-2
 
 runningCostModel = crocoddyl.CostModelSum(state, nu)  
-runningCostModel.addCost("uReg", uRegCost, 1e-4 / dt)
+runningCostModel.addCost("uReg", uRegCost, 1000 / dt)
 runningCostModel.addCost("xGoal", xGoalCost, 1e-5 / dt)
 runningCostModel.addCost("xGoal", xRunCost, 1.0)           # was 1e-5/dt
-# runningCostModel.addCost("uReg", uRegCost, 1e-6 / dt)      # was 1e-4/dt
 
 terminalCostModel = crocoddyl.CostModelSum(state, nu) 
-# terminalCostModel.addCost("xGoal", xGoalCost, 100.0)            # was 100
 terminalCostModel.addCost("xGoal", xGoalCost, 1e4)         # was 100.0
 
 runningModel = crocoddyl.IntegratedActionModelEuler(
@@ -127,7 +125,7 @@ terminalModel = crocoddyl.IntegratedActionModelEuler(
 # Creating the shooting problem and the solver
 # ==================================================================== 
 
-T = 100
+T = 500 
 # Initialize with a reasonable starting configuration for the crab robot
 # x0 = np.zeros(state.nx)
 x0 = state.zero() 
@@ -174,8 +172,10 @@ if WITHDISPLAY:
     #     viz.display(q)
     #     time.sleep(0.01)
     qs = [x[:model.nq] for x in solver.xs]
+    pause = 2.0 # seconds
     while True:
         for q in qs:
             viz.display(q)
-            time.sleep(dt)  # or a fixed value like 0.01
+            time.sleep(dt)  # or a fixed value like 0.01 
+        time.sleep(pause) 
 
