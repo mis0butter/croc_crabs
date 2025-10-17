@@ -1,5 +1,7 @@
 # croc_crabs
 
+![Crab rotation](crab_rotate.png)
+
 Minimal setup to optimize and visualize motions for the crab robot using Crocoddyl + Pinocchio + Meshcat.
 
 ## Repository layout
@@ -40,7 +42,7 @@ and visualizes it in Meshcat and/or plots convergence curves.
 python scripts/crabs_invdyn.py display
 ```
 - Plots (matplotlib):
-**Warning**: plots are in development and may be unstable.
+**Warning**: plots are in development and may be incorrect.
 ```bash
 python scripts/crabs_invdyn.py plot
 ```
@@ -60,4 +62,4 @@ Tips
   `conda install -c conda-forge matplotlib` 
 - If `gitman` is not found, ensure the env is active or install with: `pip install gitman`.
  
- 
+
