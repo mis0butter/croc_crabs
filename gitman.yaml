@@ -6,3 +6,9 @@ sources:
     repo: git@github.com:Creampelt/hcrl_crab_robot.git
     rev: main
     path: hcrl_crab_robot  # clones into ./crabs/hcrl_crab_robot
+
+  - name: crocoddyl
+    type: git
+    repo: git@github.com:loco-3d/crocoddyl.git
+    rev: devel 
+    path: crocoddyl  # clones into ./crocoddyl 
