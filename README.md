@@ -1,7 +1,5 @@
 # croc_crabs
 
-![Crab rotation](crab_rotate.png)
-
 Minimal setup to optimize and visualize motions for the crab robot using Crocoddyl + Pinocchio + Meshcat.
 
 ## Repository layout
