@@ -30,23 +30,24 @@ gitman update
 
 ## 3. Run an example
 
-`crabs_invdyn.py` solves an inverse-dynamics optimal control problem for the crab robot. To just solve the optimization problem and view the output in the terminal, run: 
+`crabs_invdyn.py` solves an inverse-dynamics optimal control problem for the crab robot. 
+
+- To just solve the optimization problem and **view the output in the terminal**, run: 
 ```bash 
 python scripts/crabs_invdyn.py 
 ```
 
-To visualize the robot motion in Meshcat (3D viewer), run:
+- To **visualize the robot motion in Meshcat** (3D viewer), run:
 ```bash
 python scripts/crabs_invdyn.py display
 ```
-To view analysis plots, run:
+
+- To **view analysis plots**, run (warning: still in development):
 ```bash
 python scripts/crabs_invdyn.py plot
 ```
-**Warning**: plots are in development and may be incorrect.
 
-
-To do both:
+- To view robot motion in Meschat and analysis plots:
 ```bash
 python scripts/crabs_invdyn.py plot display
 ```
