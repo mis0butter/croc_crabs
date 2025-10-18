@@ -4,33 +4,33 @@ Minimal setup to optimize and visualize motions for the crab robot using Crocodd
 
 ## Repository layout
 
-- `scripts/` – runnable examples, e.g. `crabs_invdyn.py`, `visualize_crabs.py` 
-- `hcrl_crab_robot/` – robot description (URDF + meshes). Managed by Gitman
-- `crocoddyl/` – upstream Crocoddyl sources. Intended to be read-only for learning and examples 
-- `croc_crabs.yaml` – conda environment 
-- `gitman.yaml` – Gitman-managed external repositories  
+- `scripts/`: runnable examples, e.g. `crabs_invdyn.py`, `visualize_crabs.py` 
+- `hcrl_crab_robot/`: robot description (URDF + meshes). Managed by Gitman
+- `crocoddyl/`: upstream Crocoddyl sources. Intended to be read-only for learning and examples 
+- `croc_crabs.yaml`: conda environment 
+- `gitman.yaml`: Gitman-managed external repositories  
 
-## 1) Create the environment
+## 1. Create the environment
+
+At the base level of the repo, run the following to install all dependencies: 
 
 ```bash
-# From repo root
 conda env create -f croc_crabs.yaml
 conda activate croc_crabs
 ```
 
-Notes
-- The env includes: python 3.9, numpy, matplotlib, pinocchio, crocoddyl, meshcat, and gitman (via pip).
+The env includes python 3.9, numpy, matplotlib, pinocchio, crocoddyl, meshcat, and gitman (via pip).
 
-## 2) Fetch external repositories with Gitman 
+## 2. Fetch external repositories with Gitman 
 
-This repo uses Gitman to fetch the robot description (and optionally other repos).
+This repo uses Gitman to fetch the robot model (and optionally other repos): 
 
 ```bash
 # From repo root
 gitman update 
 ```
 
-## 3) Run an example
+## 3. Run an example
 
 `crabs_invdyn.py` solves an inverse-dynamics optimal control problem for the crab robot
 and visualizes it in Meshcat and/or plots convergence curves.
