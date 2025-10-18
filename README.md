@@ -19,8 +19,6 @@ conda env create -f croc_crabs.yaml
 conda activate croc_crabs
 ```
 
-The env includes python 3.9, numpy, matplotlib, pinocchio, crocoddyl, meshcat, and gitman (via pip).
-
 ## 2. Fetch external repositories with Gitman 
 
 This repo uses Gitman to fetch the robot model (and optionally other repos): 
@@ -32,19 +30,23 @@ gitman update
 
 ## 3. Run an example
 
-`crabs_invdyn.py` solves an inverse-dynamics optimal control problem for the crab robot
-and visualizes it in Meshcat and/or plots convergence curves.
+`crabs_invdyn.py` solves an inverse-dynamics optimal control problem for the crab robot. To just solve the optimization problem and view the output in the terminal, run: 
+```bash 
+python scripts/crabs_invdyn.py 
+```
 
-- Meshcat (3D viewer):
+To visualize the robot motion in Meshcat (3D viewer), run:
 ```bash
 python scripts/crabs_invdyn.py display
 ```
-- Plots (matplotlib):
-**Warning**: plots are in development and may be incorrect.
+To view analysis plots, run:
 ```bash
 python scripts/crabs_invdyn.py plot
 ```
-- Both:
+**Warning**: plots are in development and may be incorrect.
+
+
+To do both:
 ```bash
 python scripts/crabs_invdyn.py plot display
 ```
