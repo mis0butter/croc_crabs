@@ -295,6 +295,27 @@ baseRunResidual = crocoddyl.ResidualModelState(state, xRef, nu)
 baseRunActivation = crocoddyl.ActivationModelWeightedQuad(w_base)
 baseRunCost = crocoddyl.CostModelResidual(state, baseRunActivation, baseRunResidual)
 
+# Chewie's shoulder_lift can reach the goal by folding "down" (decreasing angle)
+# straight through the body/other arm, or by swinging "up and over" (increasing
+# angle). Push the optimizer into the up-and-over homotopy with a one-sided
+# barrier that penalizes the joint dropping below its start angle.
+lift_jid = model.getJointId("chewie_shoulder_lift_joint")
+lift_idx_q = model.joints[lift_jid].idx_q
+lift_idx_v = model.joints[lift_jid].idx_v
+
+xLiftRef = state.zero()
+xLiftRef[: model.nq] = q0  # lift component already sits at its start angle
+liftLower = np.full(state.ndx, -np.inf)
+liftUpper = np.full(state.ndx, np.inf)
+liftLower[lift_idx_v] = 0.0  # residual = q_lift - q_lift_start >= 0
+liftBarrierResidual = crocoddyl.ResidualModelState(state, xLiftRef, nu)
+liftBarrierActivation = crocoddyl.ActivationModelQuadraticBarrier(
+    crocoddyl.ActivationBounds(liftLower, liftUpper)
+)
+liftBarrierCost = crocoddyl.CostModelResidual(
+    state, liftBarrierActivation, liftBarrierResidual
+)
+
 # ====================================================================
 # Setting up the running and terminal cost models
 # ====================================================================
@@ -305,6 +326,7 @@ runningCostModel = crocoddyl.CostModelSum(state, nu)
 runningCostModel.addCost("uReg", uRegCost, 1 / dt)
 runningCostModel.addCost("baseRun", baseRunCost, 10.0)
 runningCostModel.addCost("eeRun", eeRunCost, 10.0)
+runningCostModel.addCost("chewieLiftBarrier", liftBarrierCost, 1e3)
 
 terminalCostModel = crocoddyl.CostModelSum(state, nu)
 terminalCostModel.addCost("ee", eeCost, 1e6)
@@ -342,8 +364,17 @@ if WITHPLOT:
 else:
     solver.setCallbacks([crocoddyl.CallbackVerbose()])
 
+# Warm-start in the "up-and-over" homotopy: seed a trajectory in which Chewie's
+# shoulder_lift ramps upward (increasing angle) rather than folding down through
+# the body. Without this, gradient descent from the default constant guess lands
+# in the fold-down local minimum and merely pays the barrier penalty.
+xs_init = [x0.copy() for _ in range(T + 1)]
+for k, x in enumerate(xs_init):
+    x[lift_idx_q] = q0[lift_idx_q] + 2.0 * (k / T)
+us_init = solver.problem.quasiStatic([x for x in xs_init[:-1]])
+
 # Solving the problem with the solver
-solver.solve()
+solver.solve(xs_init, us_init)
 
 q_final = solver.xs[-1][: model.nq]
 pinocchio.forwardKinematics(model, data, q_final)
@@ -354,6 +385,12 @@ print(f"Final   {CHEWIE_EE_FRAME} position: {ee_final}")
 print(f"Position error [m]: {np.linalg.norm(ee_final - CHEWIE_EE_POS_ENV):.4f}")
 print(f"Base position drift [m]: {np.linalg.norm(q_final[:3] - q0[:3]):.4f}")
 print(f"Base orientation drift [quat]: {q_final[3:7] - q0[3:7]}")
+
+_lift_traj = np.array([x[lift_idx_q] for x in solver.xs])
+print(
+    f"chewie shoulder_lift: start={_lift_traj[0]:.3f} "
+    f"min={_lift_traj.min():.3f} max={_lift_traj.max():.3f} end={_lift_traj[-1]:.3f}"
+)
 
 # ====================================================================
 # Displaying the motion
