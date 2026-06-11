@@ -4,7 +4,9 @@ import signal
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pinocchio
 from pinocchio.visualize import MeshcatVisualizer
@@ -79,6 +81,175 @@ ARM_INIT_POS = {
 q0 = pinocchio.neutral(model)
 for joint_name, angle in ARM_INIT_POS.items():
     q0[model.joints[model.getJointId(joint_name)].idx_q] = angle
+
+HAN_JOINTS = [name for name in ARM_INIT_POS if name.startswith("han_")]
+CHEWIE_JOINTS = [name for name in ARM_INIT_POS if name.startswith("chewie_")]
+
+
+def parse_urdf_joint_limits(urdf_path, joint_names):
+    limits = {}
+    for joint in ET.parse(urdf_path).getroot().findall("joint"):
+        name = joint.get("name")
+        if name not in joint_names:
+            continue
+        limit = joint.find("limit")
+        if limit is None:
+            continue
+        limits[name] = {
+            "lower": float(limit.get("lower")),
+            "upper": float(limit.get("upper")),
+            "velocity": float(limit.get("velocity")),
+        }
+    return limits
+
+
+def _joint_label(joint_name):
+    return joint_name.replace("han_", "").replace("chewie_", "").replace("_joint", "")
+
+
+def _plot_arm_joint_positions(times, positions, joint_names, limits, title, fig_num):
+    n = len(joint_names)
+    ncols = 4
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, num=fig_num, figsize=(14, 2.5 * nrows), sharex=True)
+    axes = np.atleast_1d(axes).ravel()
+    for ax, joint_name in zip(axes, joint_names):
+        ax.plot(times, positions[joint_name], label="position")
+        if joint_name in limits:
+            lo, hi = limits[joint_name]["lower"], limits[joint_name]["upper"]
+            ax.axhline(lo, color="C3", ls="--", lw=1, label="limit")
+            ax.axhline(hi, color="C3", ls="--", lw=1)
+        ax.set_title(_joint_label(joint_name))
+        ax.grid(True, alpha=0.3)
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    axes[0].legend(loc="upper right", fontsize=8)
+    fig.suptitle(title)
+    fig.tight_layout()
+
+
+def _plot_arm_joint_velocities(times, velocities, joint_names, limits, title, fig_num):
+    n = len(joint_names)
+    ncols = 4
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, num=fig_num, figsize=(14, 2.5 * nrows), sharex=True)
+    axes = np.atleast_1d(axes).ravel()
+    for ax, joint_name in zip(axes, joint_names):
+        ax.plot(times, velocities[joint_name], label="velocity")
+        if joint_name in limits:
+            vlim = limits[joint_name]["velocity"]
+            ax.axhline(vlim, color="C3", ls="--", lw=1, label="limit")
+            ax.axhline(-vlim, color="C3", ls="--", lw=1)
+        ax.set_title(_joint_label(joint_name))
+        ax.grid(True, alpha=0.3)
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    axes[0].legend(loc="upper right", fontsize=8)
+    fig.suptitle(title)
+    fig.tight_layout()
+
+
+def plot_rss_reach_trajectory(
+    xs, model, data, dt, ee_frame_id, ee_goal, urdf_path, q_ref, fig_start=3
+):
+    joint_limits = parse_urdf_joint_limits(urdf_path, list(ARM_INIT_POS.keys()))
+    times = np.arange(len(xs)) * dt
+
+    positions = {name: [] for name in ARM_INIT_POS}
+    velocities = {name: [] for name in ARM_INIT_POS}
+    ee_errors = []
+    base_omega = []
+    base_rpy = []
+
+    for x in xs:
+        q = x[: model.nq]
+        v = x[model.nq :]
+        for joint_name in ARM_INIT_POS:
+            jid = model.getJointId(joint_name)
+            idx_q = model.joints[jid].idx_q
+            idx_v = model.joints[jid].idx_v
+            positions[joint_name].append(q[idx_q])
+            velocities[joint_name].append(v[idx_v])
+
+        pinocchio.forwardKinematics(model, data, q)
+        pinocchio.updateFramePlacement(model, data, ee_frame_id)
+        ee_pos = data.oMf[ee_frame_id].translation
+        ee_errors.append(np.linalg.norm(ee_pos - ee_goal))
+
+        quat = pinocchio.Quaternion(q[6], q[3], q[4], q[5])
+        base_rpy.append(pinocchio.rpy.matrixToRpy(quat.toRotationMatrix()))
+        base_omega.append(v[3:6])
+
+    positions = {name: np.asarray(vals) for name, vals in positions.items()}
+    velocities = {name: np.asarray(vals) for name, vals in velocities.items()}
+    base_rpy = np.asarray(base_rpy)
+    base_omega = np.asarray(base_omega)
+    rpy_ref = pinocchio.rpy.matrixToRpy(
+        pinocchio.Quaternion(q_ref[6], q_ref[3], q_ref[4], q_ref[5]).toRotationMatrix()
+    )
+
+    _plot_arm_joint_positions(
+        times,
+        positions,
+        HAN_JOINTS,
+        joint_limits,
+        "Han joint positions",
+        fig_start,
+    )
+    _plot_arm_joint_positions(
+        times,
+        positions,
+        CHEWIE_JOINTS,
+        joint_limits,
+        "Chewie joint positions",
+        fig_start + 1,
+    )
+    _plot_arm_joint_velocities(
+        times,
+        velocities,
+        HAN_JOINTS,
+        joint_limits,
+        "Han joint velocities",
+        fig_start + 2,
+    )
+    _plot_arm_joint_velocities(
+        times,
+        velocities,
+        CHEWIE_JOINTS,
+        joint_limits,
+        "Chewie joint velocities",
+        fig_start + 3,
+    )
+
+    fig, ax = plt.subplots(num=fig_start + 4, figsize=(8, 3))
+    ax.plot(times, ee_errors, label="||p_ee - p_goal||")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("position error [m]")
+    ax.set_title(f"End-effector tracking error ({CHEWIE_EE_FRAME})")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+
+    fig, axes = plt.subplots(2, 1, num=fig_start + 5, figsize=(8, 5), sharex=True)
+    rpy_labels = ["roll", "pitch", "yaw"]
+    for i, label in enumerate(rpy_labels):
+        axes[0].plot(times, base_rpy[:, i], label=label)
+        axes[0].axhline(rpy_ref[i], color=f"C{i}", ls=":", lw=1, alpha=0.7)
+    axes[0].set_ylabel("orientation [rad]")
+    axes[0].set_title("Base orientation (RPY)")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(ncol=3, fontsize=8)
+
+    omega_labels = ["wx", "wy", "wz"]
+    for i, label in enumerate(omega_labels):
+        axes[1].plot(times, base_omega[:, i], label=label)
+    axes[1].set_xlabel("time [s]")
+    axes[1].set_ylabel("angular velocity [rad/s]")
+    axes[1].set_title("Base angular velocity")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(ncol=3, fontsize=8)
+    fig.tight_layout()
+
 
 # ====================================================================
 # Defining the reach goal (position only)
@@ -197,6 +368,19 @@ if WITHPLOT:
     crocoddyl.plotConvergence(
         log.costs, log.pregs, log.dregs, log.grads, log.stops, log.steps, figIndex=2
     )
+
+plot_rss_reach_trajectory(
+    solver.xs,
+    model,
+    data,
+    dt,
+    CHEWIE_EE_ID,
+    CHEWIE_EE_POS_ENV,
+    urdf_path,
+    q0,
+    fig_start=10 if WITHPLOT else 1,
+)
+plt.show(block=not WITHDISPLAY)
 
 # Displaying the motion in Meshcat
 if WITHDISPLAY:
