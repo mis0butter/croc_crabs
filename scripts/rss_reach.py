@@ -52,6 +52,35 @@ state = crocoddyl.StateMultibody(model)
 actuation = crocoddyl.ActuationModelFloatingBase(state)
 
 # ====================================================================
+# Initial arm pose [rad]
+# ====================================================================
+
+ARM_INIT_POS = {
+    # Han: tucked pose for base stabilization
+    "han_shoulder_pan_joint": 0.0,
+    "han_shoulder_lift_joint": 0.0,
+    "han_elbow_joint": -2.6,
+    "han_wrist_1_joint": 0.0,
+    "han_wrist_2_joint": 0.0,
+    "han_wrist_3_joint": 0.0,
+    "han_gripper_finger1_joint": 0.0,
+    "han_gripper_finger2_joint": 0.0,
+    # Chewie: reaching pose
+    "chewie_shoulder_pan_joint": 3.14,
+    "chewie_shoulder_lift_joint": 3.14,
+    "chewie_elbow_joint": 2.6,
+    "chewie_wrist_1_joint": 0.0,
+    "chewie_wrist_2_joint": 0.0,
+    "chewie_wrist_3_joint": 0.0,
+    "chewie_gripper_finger1_joint": 0.0,
+    "chewie_gripper_finger2_joint": 0.0,
+}
+
+q0 = pinocchio.neutral(model)
+for joint_name, angle in ARM_INIT_POS.items():
+    q0[model.joints[model.getJointId(joint_name)].idx_q] = angle
+
+# ====================================================================
 # Defining the reach goal (position only)
 # ====================================================================
 
@@ -116,6 +145,7 @@ terminalModel = crocoddyl.IntegratedActionModelEuler(
 
 T = 500
 x0 = state.zero()
+x0[: model.nq] = q0
 problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
 solver = crocoddyl.SolverIntro(problem)
 
@@ -159,7 +189,7 @@ if WITHDISPLAY:
     viz = MeshcatVisualizer(model, collision_model, visual_model)
     viz.initViewer(open=True)
     viz.loadViewerModel()
-    viz.display(pinocchio.neutral(model))
+    viz.display(q0)
 
     qs = [x[: model.nq] for x in solver.xs]
     pause = 2.0
