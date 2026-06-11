@@ -103,15 +103,26 @@ eeRunCost = crocoddyl.CostModelResidual(state, eeActivation, eeResidual)
 # ====================================================================
 
 # Actuation layout (16): chewie arm+gripper [0:8], han arm+gripper [8:16].
-# Penalize han-arm torques so only chewie moves.
+# Both arms may actuate; Han is steered by the running base-stabilization cost.
 w_u = np.ones(actuation.nu) * 0.01
-w_u[8:] = 1e8
 uResidual = crocoddyl.ResidualModelJointEffort(
     state, actuation, np.zeros(actuation.nu), nu, False
 )
 uRegCost = crocoddyl.CostModelResidual(
     state, crocoddyl.ActivationModelWeightedQuad(w_u), uResidual
 )
+
+# Running-only: damp base translation and joint velocities; Han compensates via
+# base position tracking. Base orientation / angular rate are unconstrained.
+xRef = state.zero()
+xRef[: model.nq] = q0
+w_base = np.zeros(state.ndx)
+w_base[0:3] = 1e2
+w_base[state.nv : state.nv + 3] = 10
+w_base[state.nv + 6 :] = 10
+baseRunResidual = crocoddyl.ResidualModelState(state, xRef, nu)
+baseRunActivation = crocoddyl.ActivationModelWeightedQuad(w_base)
+baseRunCost = crocoddyl.CostModelResidual(state, baseRunActivation, baseRunResidual)
 
 # ====================================================================
 # Setting up the running and terminal cost models
@@ -121,6 +132,7 @@ dt = 1e-2
 
 runningCostModel = crocoddyl.CostModelSum(state, nu)
 runningCostModel.addCost("uReg", uRegCost, 1 / dt)
+runningCostModel.addCost("baseRun", baseRunCost, 10.0)
 runningCostModel.addCost("eeRun", eeRunCost, 10.0)
 
 terminalCostModel = crocoddyl.CostModelSum(state, nu)
@@ -169,6 +181,8 @@ ee_final = data.oMf[CHEWIE_EE_ID].translation.copy()
 print(f"Target {CHEWIE_EE_FRAME} position: {CHEWIE_EE_POS_ENV}")
 print(f"Final   {CHEWIE_EE_FRAME} position: {ee_final}")
 print(f"Position error [m]: {np.linalg.norm(ee_final - CHEWIE_EE_POS_ENV):.4f}")
+print(f"Base position drift [m]: {np.linalg.norm(q_final[:3] - q0[:3]):.4f}")
+print(f"Base orientation drift [quat]: {q_final[3:7] - q0[3:7]}")
 
 # ====================================================================
 # Displaying the motion
