@@ -269,7 +269,7 @@ def _save_arm_joint_figure(out_dir, traj, limits, arm_name, joint_names, color, 
     plt.close(fig)
 
 
-def _save_figure_b(out_dir, traj, q_ref, ee_goal):
+def _save_base_figure(out_dir, traj, q_ref):
     times = traj["times"]
     rpy_ref = pinocchio.rpy.matrixToRpy(
         pinocchio.Quaternion(q_ref[6], q_ref[3], q_ref[4], q_ref[5]).toRotationMatrix()
@@ -283,31 +283,13 @@ def _save_figure_b(out_dir, traj, q_ref, ee_goal):
         "base_wx",
         "base_wy",
         "base_wz",
-        "com_x",
-        "com_y",
-        "com_z",
-        "ee_x",
-        "ee_y",
-        "ee_z",
-        "ee_error",
     ]
     csv_rows = [
-        [
-            t,
-            *traj["base_rpy"][k],
-            *traj["base_omega"][k],
-            *traj["com_pos"][k],
-            *traj["ee_pos"][k],
-            traj["ee_errors"][k],
-        ]
+        [t, *traj["base_rpy"][k], *traj["base_omega"][k]]
         for k, t in enumerate(times)
     ]
 
-    fig = plt.figure(figsize=(12, 9))
-    ax_ori = fig.add_subplot(2, 2, 1)
-    ax_3d = fig.add_subplot(2, 2, 2, projection="3d")
-    ax_ang = fig.add_subplot(2, 2, 3)
-    ax_err = fig.add_subplot(2, 2, 4)
+    fig, (ax_ori, ax_ang) = plt.subplots(1, 2, figsize=(12, 4))
 
     rpy_labels = ["roll", "pitch", "yaw"]
     for i, label in enumerate(rpy_labels):
@@ -328,10 +310,82 @@ def _save_figure_b(out_dir, traj, q_ref, ee_goal):
     ax_ang.grid(True, alpha=0.3)
     ax_ang.legend(ncol=3, fontsize=8)
 
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "base_motion.png"), dpi=150, bbox_inches="tight")
+    _write_csv(os.path.join(out_dir, "base_motion.csv"), csv_columns, csv_rows)
+    plt.close(fig)
+
+
+def _save_com_ee_figure(out_dir, traj, ee_goal):
+    times = traj["times"]
     com = traj["com_pos"]
     ee = traj["ee_pos"]
-    ax_3d.plot(com[:, 0], com[:, 1], com[:, 2], color="tab:green", label="COM")
-    ax_3d.plot(ee[:, 0], ee[:, 1], ee[:, 2], color="tab:blue", label="EE")
+
+    csv_columns = [
+        "time_s",
+        "com_x",
+        "com_y",
+        "com_z",
+        "ee_x",
+        "ee_y",
+        "ee_z",
+        "ee_error",
+    ]
+    csv_rows = [
+        [t, *com[k], *ee[k], traj["ee_errors"][k]]
+        for k, t in enumerate(times)
+    ]
+
+    fig = plt.figure(figsize=(12, 9))
+    gs = fig.add_gridspec(3, 2, width_ratios=[1, 1.2], hspace=0.35, wspace=0.3)
+
+    ax_com_x = fig.add_subplot(gs[0, 0])
+    ax_com_y = fig.add_subplot(gs[1, 0], sharex=ax_com_x)
+    ax_com_z = fig.add_subplot(gs[2, 0], sharex=ax_com_x)
+    ax_3d = fig.add_subplot(gs[0:2, 1], projection="3d")
+    ax_err = fig.add_subplot(gs[2, 1], sharex=ax_com_x)
+
+    ax_com_x.plot(times, com[:, 0], color="tab:green")
+    ax_com_x.set_ylabel("x [m]")
+    ax_com_x.set_title("COM x")
+    ax_com_x.grid(True, alpha=0.3)
+
+    ax_com_y.plot(times, com[:, 1], color="tab:green")
+    ax_com_y.set_ylabel("y [m]")
+    ax_com_y.set_title("COM y")
+    ax_com_y.grid(True, alpha=0.3)
+
+    ax_com_z.plot(times, com[:, 2], color="tab:green")
+    ax_com_z.set_xlabel("time [s]")
+    ax_com_z.set_ylabel("z [m]")
+    ax_com_z.set_title("COM z")
+    ax_com_z.grid(True, alpha=0.3)
+
+    plt.setp(ax_com_x.get_xticklabels(), visible=False)
+    plt.setp(ax_com_y.get_xticklabels(), visible=False)
+
+    ax_err.plot(
+        times,
+        traj["ee_errors"],
+        color="tab:purple",
+        label=f"||p_ee - p_goal|| ({CHEWIE_EE_FRAME})",
+    )
+    ax_err.set_xlabel("time [s]")
+    ax_err.set_ylabel("error [m]")
+    ax_err.set_title("End-effector tracking error")
+    ax_err.grid(True, alpha=0.3)
+    ax_err.legend(fontsize=8)
+
+    ax_3d.scatter(
+        com[:, 0],
+        com[:, 1],
+        com[:, 2],
+        color="tab:green",
+        marker="o",
+        s=40,
+        label="COM",
+    )
+    ax_3d.plot(ee[:, 0], ee[:, 1], ee[:, 2], color="tab:purple", label="EE")
     ax_3d.scatter(
         ee_goal[0],
         ee_goal[1],
@@ -347,17 +401,9 @@ def _save_figure_b(out_dir, traj, q_ref, ee_goal):
     ax_3d.set_title("COM and end-effector position")
     ax_3d.legend(fontsize=8)
 
-    ax_err.plot(times, traj["ee_errors"], label=f"||p_ee - p_goal|| ({CHEWIE_EE_FRAME})")
-    ax_err.set_xlabel("time [s]")
-    ax_err.set_ylabel("error [m]")
-    ax_err.set_title("End-effector tracking error")
-    ax_err.grid(True, alpha=0.3)
-    ax_err.legend(fontsize=8)
-
-    fig.suptitle("Figure B: base and end-effector tracking")
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "figure_b.png"), dpi=150, bbox_inches="tight")
-    _write_csv(os.path.join(out_dir, "figure_b.csv"), csv_columns, csv_rows)
+    fig.savefig(os.path.join(out_dir, "com_ee_tracking.png"), dpi=150, bbox_inches="tight")
+    _write_csv(os.path.join(out_dir, "com_ee_tracking.csv"), csv_columns, csv_rows)
     plt.close(fig)
 
 
@@ -368,7 +414,8 @@ def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urd
     _save_arm_joint_figure(
         out_dir, traj, limits, "chewie", CHEWIE_JOINTS, "tab:red", "-"
     )
-    _save_figure_b(out_dir, traj, q_ref, ee_goal)
+    _save_base_figure(out_dir, traj, q_ref)
+    _save_com_ee_figure(out_dir, traj, ee_goal)
     print(f"Saved figures and CSVs to {os.path.abspath(out_dir)}")
 
 
