@@ -166,6 +166,156 @@ def parse_urdf_joint_limits(urdf_path, joint_names):
     return limits
 
 
+def parse_armed_mockup_inertial(urdf_path):
+    for link in ET.parse(urdf_path).getroot().findall("link"):
+        if link.get("name") != "armed_mockup":
+            continue
+        inertial = link.find("inertial")
+        if inertial is None:
+            break
+        mass = inertial.find("mass")
+        inertia = inertial.find("inertia")
+        return {
+            "link": "armed_mockup",
+            "mass_kg": float(mass.get("value")),
+            "ixx": float(inertia.get("ixx")),
+            "ixy": float(inertia.get("ixy")),
+            "ixz": float(inertia.get("ixz")),
+            "iyy": float(inertia.get("iyy")),
+            "iyz": float(inertia.get("iyz")),
+            "izz": float(inertia.get("izz")),
+        }
+    return None
+
+
+def _csv_cell(value):
+    text = np.array2string(value, separator=" ") if isinstance(value, np.ndarray) else str(value)
+    if any(c in text for c in [",", '"', "\n"]):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def _save_sim_parameters(out_dir, urdf_path, sim_params):
+    inertial = parse_armed_mockup_inertial(urdf_path)
+    md_path = os.path.join(out_dir, "sim_parameters.md")
+    csv_path = os.path.join(out_dir, "sim_parameters.csv")
+
+    lines = [
+        "# RSS reach simulation parameters",
+        "",
+        "## Problem setup",
+        "",
+        f"- control_hz: {sim_params['control_hz']}",
+        f"- dt [s]: {sim_params['dt']}",
+        f"- horizon_s [s]: {sim_params['horizon_s']}",
+        f"- T (nodes): {sim_params['T']}",
+        f"- gravity [m/s^2]: {np.array2string(sim_params['gravity'], separator=' ')}",
+        f"- ee_frame: {sim_params['ee_frame']}",
+        f"- ee_goal [m]: {np.array2string(sim_params['ee_goal'], separator=' ')}",
+        "",
+        "## Armed mockup inertial (`armed_mockup` link, URDF)",
+        "",
+    ]
+    csv_rows = [
+        ("section", "parameter", "value"),
+        ("problem", "control_hz", sim_params["control_hz"]),
+        ("problem", "dt_s", sim_params["dt"]),
+        ("problem", "horizon_s", sim_params["horizon_s"]),
+        ("problem", "T", sim_params["T"]),
+        ("problem", "gravity_m_s2", sim_params["gravity"]),
+        ("problem", "ee_frame", sim_params["ee_frame"]),
+        ("problem", "ee_goal_m", sim_params["ee_goal"]),
+    ]
+
+    if inertial:
+        lines.extend(
+            [
+                f"- mass [kg]: {inertial['mass_kg']}",
+                f"- ixx [kg m^2]: {inertial['ixx']}",
+                f"- ixy [kg m^2]: {inertial['ixy']}",
+                f"- ixz [kg m^2]: {inertial['ixz']}",
+                f"- iyy [kg m^2]: {inertial['iyy']}",
+                f"- iyz [kg m^2]: {inertial['iyz']}",
+                f"- izz [kg m^2]: {inertial['izz']}",
+                "",
+            ]
+        )
+        for key in ("mass_kg", "ixx", "ixy", "ixz", "iyy", "iyz", "izz"):
+            csv_rows.append(("armed_mockup_inertial", key, inertial[key]))
+    else:
+        lines.append("- armed_mockup inertial not found in URDF")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Running cost terms",
+            "",
+            "| term | weight | description |",
+            "| --- | ---: | --- |",
+        ]
+    )
+    for cost in sim_params["running_costs"]:
+        lines.append(f"| {cost['name']} | {cost['weight']} | {cost['description']} |")
+        csv_rows.append(("running_cost", cost["name"], cost["weight"]))
+        csv_rows.append(("running_cost_description", cost["name"], cost["description"]))
+
+    lines.extend(
+        [
+            "",
+            "## Terminal cost terms",
+            "",
+            "| term | weight | description |",
+            "| --- | ---: | --- |",
+        ]
+    )
+    for cost in sim_params["terminal_costs"]:
+        lines.append(f"| {cost['name']} | {cost['weight']} | {cost['description']} |")
+        csv_rows.append(("terminal_cost", cost["name"], cost["weight"]))
+        csv_rows.append(("terminal_cost_description", cost["name"], cost["description"]))
+
+    lines.extend(
+        [
+            "",
+            "## Internal activation weights",
+            "",
+            "### Control regularization (`uReg`)",
+            "",
+            f"- w_u (all {len(sim_params['w_u'])} actuated joints): {sim_params['w_u'][0]}",
+            "",
+            "### Base stabilization (`baseRun`, running only)",
+            "",
+            f"- w_base[0:3] base position: {sim_params['w_base_position']}",
+            f"- w_base[nv:nv+3] base linear velocity: {sim_params['w_base_lin_vel']}",
+            f"- w_base[nv+6:] arm joint velocities: {sim_params['w_base_joint_vel']}",
+            "",
+            "### Chewie lift barrier (`chewieLiftBarrier`)",
+            "",
+            f"- lower bound on chewie_shoulder_lift velocity index: {sim_params['lift_barrier_lower']}",
+            "  (penalizes shoulder_lift dropping below its start angle)",
+            "",
+        ]
+    )
+    csv_rows.extend(
+        [
+            ("activation", "w_u", sim_params["w_u"][0]),
+            ("activation", "w_base_position", sim_params["w_base_position"]),
+            ("activation", "w_base_lin_vel", sim_params["w_base_lin_vel"]),
+            ("activation", "w_base_joint_vel", sim_params["w_base_joint_vel"]),
+            ("activation", "lift_barrier_lower", sim_params["lift_barrier_lower"]),
+        ]
+    )
+
+    with open(md_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+    with open(csv_path, "w") as f:
+        f.write("section,parameter,value\n")
+        for section, parameter, value in csv_rows[1:]:
+            f.write(f"{section},{parameter},{_csv_cell(value)}\n")
+
+    print(f"Saved sim parameters to {os.path.abspath(md_path)}")
+
+
 def _plot_joint_limits(ax, joint_name, limits, kind):
     if joint_name not in limits:
         return
@@ -407,7 +557,7 @@ def _save_com_ee_figure(out_dir, traj, ee_goal):
     plt.close(fig)
 
 
-def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urdf_path, out_dir):
+def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urdf_path, out_dir, sim_params):
     traj = _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal)
     limits = parse_urdf_joint_limits(urdf_path, list(ARM_INIT_POS.keys()))
     _save_arm_joint_figure(out_dir, traj, limits, "han", HAN_JOINTS, "tab:blue", "-")
@@ -416,6 +566,7 @@ def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urd
     )
     _save_base_figure(out_dir, traj, q_ref)
     _save_com_ee_figure(out_dir, traj, ee_goal)
+    _save_sim_parameters(out_dir, urdf_path, sim_params)
     print(f"Saved figures and CSVs to {os.path.abspath(out_dir)}")
 
 
@@ -561,6 +712,49 @@ print(
 # Plotting the entire motion
 if WITHPLOT:
     out_dir = _make_output_dir()
+    sim_params = {
+        "control_hz": CONTROL_HZ,
+        "dt": dt,
+        "horizon_s": HORIZON_S,
+        "T": T,
+        "gravity": model.gravity.linear.copy(),
+        "ee_frame": CHEWIE_EE_FRAME,
+        "ee_goal": CHEWIE_EE_POS_ENV,
+        "running_costs": [
+            {
+                "name": "uReg",
+                "weight": 1 / dt,
+                "description": "Actuation regularization (WeightedQuad, w_u=0.01 per joint)",
+            },
+            {
+                "name": "baseRun",
+                "weight": 10.0,
+                "description": "Track initial base pose and damp base/arm joint velocities",
+            },
+            {
+                "name": "eeRun",
+                "weight": 10.0,
+                "description": f"Running EE position tracking ({CHEWIE_EE_FRAME})",
+            },
+            {
+                "name": "chewieLiftBarrier",
+                "weight": 1e3,
+                "description": "One-sided barrier: chewie shoulder_lift >= start angle",
+            },
+        ],
+        "terminal_costs": [
+            {
+                "name": "ee",
+                "weight": 1e6,
+                "description": f"Terminal EE position tracking ({CHEWIE_EE_FRAME})",
+            },
+        ],
+        "w_u": w_u,
+        "w_base_position": w_base[0],
+        "w_base_lin_vel": w_base[state.nv],
+        "w_base_joint_vel": w_base[state.nv + 6],
+        "lift_barrier_lower": liftLower[lift_idx_v],
+    }
     save_rss_reach_outputs(
         solver.xs,
         model,
@@ -571,6 +765,7 @@ if WITHPLOT:
         q0,
         urdf_path,
         out_dir,
+        sim_params,
     )
 
 # Displaying the motion in Meshcat
