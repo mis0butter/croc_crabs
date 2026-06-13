@@ -8,6 +8,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import matplotlib.pyplot as plt
+import meshcat.geometry as g
+import meshcat.transformations as tf
 import numpy as np
 import pinocchio
 from pinocchio.visualize import MeshcatVisualizer
@@ -570,6 +572,14 @@ def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urd
     print(f"Saved figures and CSVs to {os.path.abspath(out_dir)}")
 
 
+def _init_ee_goal_marker(viz, goal_pos, radius):
+    viz.viewer["chewie_ee_goal"].set_object(
+        g.Sphere(radius),
+        g.MeshLambertMaterial(color=0xFF0000),
+    )
+    viz.viewer["chewie_ee_goal"].set_transform(tf.translation_matrix(goal_pos))
+
+
 # ====================================================================
 # Defining the reach goal (position only)
 # ====================================================================
@@ -776,6 +786,8 @@ if WITHDISPLAY or WITHVIDEO:
     viz = MeshcatVisualizer(model, collision_model, visual_model)
     viz.initViewer(open=WITHDISPLAY)
     viz.loadViewerModel()
+    ee_marker_radius = 0.05
+    _init_ee_goal_marker(viz, CHEWIE_EE_POS_ENV, ee_marker_radius)
     viz.display(q0)
 
     qs = [x[: model.nq] for x in solver.xs]
