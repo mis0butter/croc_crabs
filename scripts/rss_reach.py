@@ -710,8 +710,11 @@ print(
 # ====================================================================
 
 # Plotting the entire motion
-if WITHPLOT:
+out_dir = None
+if WITHPLOT or WITHVIDEO:
     out_dir = _make_output_dir()
+
+if WITHPLOT:
     sim_params = {
         "control_hz": CONTROL_HZ,
         "dt": dt,
@@ -780,16 +783,14 @@ if WITHDISPLAY or WITHVIDEO:
     frame_dir = None
     frame_idx = 0
     if WITHVIDEO:
-        frame_dir = os.path.join(
-            os.path.dirname(__file__), "..", "output", "rss_reach_frames"
-        )
+        frame_dir = os.path.join(out_dir, "frames")
         os.makedirs(frame_dir, exist_ok=True)
         print(f"Saving frames to {os.path.abspath(frame_dir)}")
         print(
             "Create video with:\n"
             f"  ffmpeg -y -framerate {1 / dt:.0f} "
             f"-i {os.path.abspath(frame_dir)}/frame_%06d.png "
-            "-c:v libx264 -pix_fmt yuv420p rss_reach.mp4"
+            f"-c:v libx264 -pix_fmt yuv420p {os.path.abspath(out_dir)}/rss_reach.mp4"
         )
 
     save_frames = WITHVIDEO
