@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -87,6 +88,67 @@ HAN_JOINTS = [name for name in ARM_INIT_POS if name.startswith("han_")]
 CHEWIE_JOINTS = [name for name in ARM_INIT_POS if name.startswith("chewie_")]
 
 
+def _joint_label(joint_name):
+    return joint_name.replace("han_", "").replace("chewie_", "").replace("_joint", "")
+
+
+def _make_output_dir():
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "output", stamp)
+    os.makedirs(out_dir, exist_ok=True)
+    return out_dir
+
+
+def _write_csv(path, columns, rows):
+    header = ",".join(columns)
+    with open(path, "w") as f:
+        f.write(header + "\n")
+        for row in rows:
+            f.write(",".join(f"{val:.9g}" for val in row) + "\n")
+
+
+def _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal):
+    times = np.arange(len(xs)) * dt
+    positions = {name: [] for name in ARM_INIT_POS}
+    velocities = {name: [] for name in ARM_INIT_POS}
+    ee_errors = []
+    ee_pos = []
+    base_rpy = []
+    base_omega = []
+    com_pos = []
+
+    for x in xs:
+        q = x[: model.nq]
+        v = x[model.nq :]
+        for joint_name in ARM_INIT_POS:
+            jid = model.getJointId(joint_name)
+            positions[joint_name].append(q[model.joints[jid].idx_q])
+            velocities[joint_name].append(v[model.joints[jid].idx_v])
+
+        pinocchio.forwardKinematics(model, data, q)
+        pinocchio.centerOfMass(model, data, q)
+        pinocchio.updateFramePlacement(model, data, ee_frame_id)
+        ee_position = data.oMf[ee_frame_id].translation.copy()
+        ee_errors.append(np.linalg.norm(ee_position - ee_goal))
+        ee_pos.append(ee_position)
+
+        quat = pinocchio.Quaternion(q[6], q[3], q[4], q[5])
+        base_rpy.append(pinocchio.rpy.matrixToRpy(quat.toRotationMatrix()))
+        base_omega.append(v[3:6])
+        com_pos.append(data.com[0].copy())
+
+    return {
+        "times": times,
+        "positions": {name: np.asarray(vals) for name, vals in positions.items()},
+        "velocities": {name: np.asarray(vals) for name, vals in velocities.items()},
+        "ee_errors": np.asarray(ee_errors),
+        "ee_pos": np.asarray(ee_pos),
+        "base_rpy": np.asarray(base_rpy),
+        "base_omega": np.asarray(base_omega),
+        "com_pos": np.asarray(com_pos),
+    }
+
+
 def parse_urdf_joint_limits(urdf_path, joint_names):
     limits = {}
     for joint in ET.parse(urdf_path).getroot().findall("joint"):
@@ -104,152 +166,210 @@ def parse_urdf_joint_limits(urdf_path, joint_names):
     return limits
 
 
-def _joint_label(joint_name):
-    return joint_name.replace("han_", "").replace("chewie_", "").replace("_joint", "")
+def _plot_joint_limits(ax, joint_name, limits, kind):
+    if joint_name not in limits:
+        return
+    if kind == "position":
+        ax.axhline(
+            limits[joint_name]["lower"],
+            color="gray",
+            ls="--",
+            lw=1,
+            alpha=0.8,
+            label="limit",
+        )
+        ax.axhline(
+            limits[joint_name]["upper"],
+            color="gray",
+            ls="--",
+            lw=1,
+            alpha=0.8,
+        )
+    else:
+        vlim = limits[joint_name]["velocity"]
+        ax.axhline(vlim, color="gray", ls="--", lw=1, alpha=0.8, label="limit")
+        ax.axhline(-vlim, color="gray", ls="--", lw=1, alpha=0.8)
 
 
-def _plot_arm_joint_positions(times, positions, joint_names, limits, title, fig_num):
-    n = len(joint_names)
-    ncols = 4
-    nrows = (n + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, num=fig_num, figsize=(14, 2.5 * nrows), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
-    for ax, joint_name in zip(axes, joint_names):
-        ax.plot(times, positions[joint_name], label="position")
-        if joint_name in limits:
-            lo, hi = limits[joint_name]["lower"], limits[joint_name]["upper"]
-            ax.axhline(lo, color="C3", ls="--", lw=1, label="limit")
-            ax.axhline(hi, color="C3", ls="--", lw=1)
-        ax.set_title(_joint_label(joint_name))
-        ax.grid(True, alpha=0.3)
-    for ax in axes[n:]:
-        ax.set_visible(False)
-    axes[0].legend(loc="upper right", fontsize=8)
-    fig.suptitle(title)
-    fig.tight_layout()
+def _save_arm_joint_figure(out_dir, traj, limits, arm_name, joint_names, color, linestyle):
+    times = traj["times"]
+    positions = traj["positions"]
+    velocities = traj["velocities"]
+
+    fig = plt.figure(figsize=(14, 11))
+    gs = fig.add_gridspec(
+        5,
+        4,
+        height_ratios=[1, 1, 0.1, 1, 1],
+        hspace=0.4,
+        wspace=0.25,
+        top=0.93,
+        bottom=0.06,
+        left=0.06,
+        right=0.98,
+    )
+
+    csv_columns = ["time_s"]
+    csv_rows = []
+    for k, time_s in enumerate(times):
+        row = [time_s]
+        for joint_name in joint_names:
+            row.extend([positions[joint_name][k], velocities[joint_name][k]])
+        csv_rows.append(row)
+
+    for joint_idx, joint_name in enumerate(joint_names):
+        label = _joint_label(joint_name)
+        csv_columns.extend([f"{label}_pos", f"{label}_vel"])
+
+        pos_row, pos_col = divmod(joint_idx, 4)
+        pos_ax = fig.add_subplot(gs[pos_row, pos_col])
+        vel_ax = fig.add_subplot(gs[pos_row + 3, pos_col], sharex=pos_ax)
+
+        pos_ax.plot(times, positions[joint_name], color=color, ls=linestyle, label=arm_name)
+        _plot_joint_limits(pos_ax, joint_name, limits, "position")
+        pos_ax.set_title(label)
+        pos_ax.grid(True, alpha=0.3)
+
+        vel_ax.plot(times, velocities[joint_name], color=color, ls=linestyle)
+        _plot_joint_limits(vel_ax, joint_name, limits, "velocity")
+        vel_ax.set_title(label)
+        vel_ax.grid(True, alpha=0.3)
+
+        if joint_idx == 0:
+            pos_ax.legend(loc="upper right", fontsize=7)
+        if pos_row == 0:
+            plt.setp(pos_ax.get_xticklabels(), visible=False)
+        else:
+            pos_ax.set_xlabel("time [s]")
+        if pos_row == 0:
+            plt.setp(vel_ax.get_xticklabels(), visible=False)
+        else:
+            vel_ax.set_xlabel("time [s]")
+
+    fig.text(
+        0.5,
+        0.975,
+        f"{arm_name} joint positions [rad]",
+        ha="center",
+        fontsize=15,
+        fontweight="bold",
+    )
+    fig.text(
+        0.5,
+        0.48,
+        f"{arm_name} joint velocities [rad/s]",
+        ha="center",
+        fontsize=15,
+        fontweight="bold",
+    )
+    fig.savefig(
+        os.path.join(out_dir, f"{arm_name}_joints.png"), dpi=150, bbox_inches="tight"
+    )
+    _write_csv(os.path.join(out_dir, f"{arm_name}_joints.csv"), csv_columns, csv_rows)
+    plt.close(fig)
 
 
-def _plot_arm_joint_velocities(times, velocities, joint_names, limits, title, fig_num):
-    n = len(joint_names)
-    ncols = 4
-    nrows = (n + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, num=fig_num, figsize=(14, 2.5 * nrows), sharex=True)
-    axes = np.atleast_1d(axes).ravel()
-    for ax, joint_name in zip(axes, joint_names):
-        ax.plot(times, velocities[joint_name], label="velocity")
-        if joint_name in limits:
-            vlim = limits[joint_name]["velocity"]
-            ax.axhline(vlim, color="C3", ls="--", lw=1, label="limit")
-            ax.axhline(-vlim, color="C3", ls="--", lw=1)
-        ax.set_title(_joint_label(joint_name))
-        ax.grid(True, alpha=0.3)
-    for ax in axes[n:]:
-        ax.set_visible(False)
-    axes[0].legend(loc="upper right", fontsize=8)
-    fig.suptitle(title)
-    fig.tight_layout()
-
-
-def plot_rss_reach_trajectory(
-    xs, model, data, dt, ee_frame_id, ee_goal, urdf_path, q_ref, fig_start=3
-):
-    joint_limits = parse_urdf_joint_limits(urdf_path, list(ARM_INIT_POS.keys()))
-    times = np.arange(len(xs)) * dt
-
-    positions = {name: [] for name in ARM_INIT_POS}
-    velocities = {name: [] for name in ARM_INIT_POS}
-    ee_errors = []
-    base_omega = []
-    base_rpy = []
-
-    for x in xs:
-        q = x[: model.nq]
-        v = x[model.nq :]
-        for joint_name in ARM_INIT_POS:
-            jid = model.getJointId(joint_name)
-            idx_q = model.joints[jid].idx_q
-            idx_v = model.joints[jid].idx_v
-            positions[joint_name].append(q[idx_q])
-            velocities[joint_name].append(v[idx_v])
-
-        pinocchio.forwardKinematics(model, data, q)
-        pinocchio.updateFramePlacement(model, data, ee_frame_id)
-        ee_pos = data.oMf[ee_frame_id].translation
-        ee_errors.append(np.linalg.norm(ee_pos - ee_goal))
-
-        quat = pinocchio.Quaternion(q[6], q[3], q[4], q[5])
-        base_rpy.append(pinocchio.rpy.matrixToRpy(quat.toRotationMatrix()))
-        base_omega.append(v[3:6])
-
-    positions = {name: np.asarray(vals) for name, vals in positions.items()}
-    velocities = {name: np.asarray(vals) for name, vals in velocities.items()}
-    base_rpy = np.asarray(base_rpy)
-    base_omega = np.asarray(base_omega)
+def _save_figure_b(out_dir, traj, q_ref, ee_goal):
+    times = traj["times"]
     rpy_ref = pinocchio.rpy.matrixToRpy(
         pinocchio.Quaternion(q_ref[6], q_ref[3], q_ref[4], q_ref[5]).toRotationMatrix()
     )
 
-    _plot_arm_joint_positions(
-        times,
-        positions,
-        HAN_JOINTS,
-        joint_limits,
-        "Han joint positions",
-        fig_start,
-    )
-    _plot_arm_joint_positions(
-        times,
-        positions,
-        CHEWIE_JOINTS,
-        joint_limits,
-        "Chewie joint positions",
-        fig_start + 1,
-    )
-    _plot_arm_joint_velocities(
-        times,
-        velocities,
-        HAN_JOINTS,
-        joint_limits,
-        "Han joint velocities",
-        fig_start + 2,
-    )
-    _plot_arm_joint_velocities(
-        times,
-        velocities,
-        CHEWIE_JOINTS,
-        joint_limits,
-        "Chewie joint velocities",
-        fig_start + 3,
-    )
+    csv_columns = [
+        "time_s",
+        "base_roll",
+        "base_pitch",
+        "base_yaw",
+        "base_wx",
+        "base_wy",
+        "base_wz",
+        "com_x",
+        "com_y",
+        "com_z",
+        "ee_x",
+        "ee_y",
+        "ee_z",
+        "ee_error",
+    ]
+    csv_rows = [
+        [
+            t,
+            *traj["base_rpy"][k],
+            *traj["base_omega"][k],
+            *traj["com_pos"][k],
+            *traj["ee_pos"][k],
+            traj["ee_errors"][k],
+        ]
+        for k, t in enumerate(times)
+    ]
 
-    fig, ax = plt.subplots(num=fig_start + 4, figsize=(8, 3))
-    ax.plot(times, ee_errors, label="||p_ee - p_goal||")
-    ax.set_xlabel("time [s]")
-    ax.set_ylabel("position error [m]")
-    ax.set_title(f"End-effector tracking error ({CHEWIE_EE_FRAME})")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
+    fig = plt.figure(figsize=(12, 9))
+    ax_ori = fig.add_subplot(2, 2, 1)
+    ax_3d = fig.add_subplot(2, 2, 2, projection="3d")
+    ax_ang = fig.add_subplot(2, 2, 3)
+    ax_err = fig.add_subplot(2, 2, 4)
 
-    fig, axes = plt.subplots(2, 1, num=fig_start + 5, figsize=(8, 5), sharex=True)
     rpy_labels = ["roll", "pitch", "yaw"]
     for i, label in enumerate(rpy_labels):
-        axes[0].plot(times, base_rpy[:, i], label=label)
-        axes[0].axhline(rpy_ref[i], color=f"C{i}", ls=":", lw=1, alpha=0.7)
-    axes[0].set_ylabel("orientation [rad]")
-    axes[0].set_title("Base orientation (RPY)")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend(ncol=3, fontsize=8)
+        ax_ori.plot(times, traj["base_rpy"][:, i], label=label)
+        ax_ori.axhline(rpy_ref[i], color=f"C{i}", ls=":", lw=1, alpha=0.7)
+    ax_ori.set_xlabel("time [s]")
+    ax_ori.set_ylabel("orientation [rad]")
+    ax_ori.set_title("Base orientation (RPY)")
+    ax_ori.grid(True, alpha=0.3)
+    ax_ori.legend(ncol=3, fontsize=8)
 
     omega_labels = ["wx", "wy", "wz"]
     for i, label in enumerate(omega_labels):
-        axes[1].plot(times, base_omega[:, i], label=label)
-    axes[1].set_xlabel("time [s]")
-    axes[1].set_ylabel("angular velocity [rad/s]")
-    axes[1].set_title("Base angular velocity")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend(ncol=3, fontsize=8)
+        ax_ang.plot(times, traj["base_omega"][:, i], label=label)
+    ax_ang.set_xlabel("time [s]")
+    ax_ang.set_ylabel("angular velocity [rad/s]")
+    ax_ang.set_title("Base angular velocity")
+    ax_ang.grid(True, alpha=0.3)
+    ax_ang.legend(ncol=3, fontsize=8)
+
+    com = traj["com_pos"]
+    ee = traj["ee_pos"]
+    ax_3d.plot(com[:, 0], com[:, 1], com[:, 2], color="tab:green", label="COM")
+    ax_3d.plot(ee[:, 0], ee[:, 1], ee[:, 2], color="tab:blue", label="EE")
+    ax_3d.scatter(
+        ee_goal[0],
+        ee_goal[1],
+        ee_goal[2],
+        color="gold",
+        marker="*",
+        s=120,
+        label="EE goal",
+    )
+    ax_3d.set_xlabel("x [m]")
+    ax_3d.set_ylabel("y [m]")
+    ax_3d.set_zlabel("z [m]")
+    ax_3d.set_title("COM and end-effector position")
+    ax_3d.legend(fontsize=8)
+
+    ax_err.plot(times, traj["ee_errors"], label=f"||p_ee - p_goal|| ({CHEWIE_EE_FRAME})")
+    ax_err.set_xlabel("time [s]")
+    ax_err.set_ylabel("error [m]")
+    ax_err.set_title("End-effector tracking error")
+    ax_err.grid(True, alpha=0.3)
+    ax_err.legend(fontsize=8)
+
+    fig.suptitle("Figure B: base and end-effector tracking")
     fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "figure_b.png"), dpi=150, bbox_inches="tight")
+    _write_csv(os.path.join(out_dir, "figure_b.csv"), csv_columns, csv_rows)
+    plt.close(fig)
+
+
+def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urdf_path, out_dir):
+    traj = _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal)
+    limits = parse_urdf_joint_limits(urdf_path, list(ARM_INIT_POS.keys()))
+    _save_arm_joint_figure(out_dir, traj, limits, "han", HAN_JOINTS, "tab:blue", "-")
+    _save_arm_joint_figure(
+        out_dir, traj, limits, "chewie", CHEWIE_JOINTS, "tab:red", "-"
+    )
+    _save_figure_b(out_dir, traj, q_ref, ee_goal)
+    print(f"Saved figures and CSVs to {os.path.abspath(out_dir)}")
 
 
 # ====================================================================
@@ -321,7 +441,7 @@ liftBarrierCost = crocoddyl.CostModelResidual(
 # Setting up the running and terminal cost models
 # ====================================================================
 
-CONTROL_HZ = 250
+CONTROL_HZ = 50
 dt = 1.0 / CONTROL_HZ
 
 runningCostModel = crocoddyl.CostModelSum(state, nu)
@@ -357,15 +477,7 @@ x0[: model.nq] = q0
 problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
 solver = crocoddyl.SolverIntro(problem)
 
-if WITHPLOT:
-    solver.setCallbacks(
-        [
-            crocoddyl.CallbackVerbose(),
-            crocoddyl.CallbackLogger(),
-        ]
-    )
-else:
-    solver.setCallbacks([crocoddyl.CallbackVerbose()])
+solver.setCallbacks([crocoddyl.CallbackVerbose()])
 
 # Warm-start in the "up-and-over" homotopy: seed a trajectory in which Chewie's
 # shoulder_lift ramps upward (increasing angle) rather than folding down through
@@ -401,26 +513,18 @@ print(
 
 # Plotting the entire motion
 if WITHPLOT:
-    log = solver.getCallbacks()[1]
-    crocoddyl.plotOCSolution(
-        log.xs, [u[state.nv :] for u in log.us], figIndex=1, show=False
+    out_dir = _make_output_dir()
+    save_rss_reach_outputs(
+        solver.xs,
+        model,
+        data,
+        dt,
+        CHEWIE_EE_ID,
+        CHEWIE_EE_POS_ENV,
+        q0,
+        urdf_path,
+        out_dir,
     )
-    crocoddyl.plotConvergence(
-        log.costs, log.pregs, log.dregs, log.grads, log.stops, log.steps, figIndex=2
-    )
-
-plot_rss_reach_trajectory(
-    solver.xs,
-    model,
-    data,
-    dt,
-    CHEWIE_EE_ID,
-    CHEWIE_EE_POS_ENV,
-    urdf_path,
-    q0,
-    fig_start=10 if WITHPLOT else 1,
-)
-plt.show(block=not (WITHDISPLAY or WITHVIDEO))
 
 # Displaying the motion in Meshcat
 if WITHDISPLAY or WITHVIDEO:
