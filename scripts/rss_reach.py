@@ -20,6 +20,7 @@ import crocoddyl
 
 # argument handling
 WITHDISPLAY = "display" in sys.argv or "CROCODDYL_DISPLAY" in os.environ
+WITHVIDEO = "video" in sys.argv
 WITHPLOT = "plot" in sys.argv or "CROCODDYL_PLOT" in os.environ
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -417,19 +418,42 @@ plot_rss_reach_trajectory(
     q0,
     fig_start=10 if WITHPLOT else 1,
 )
-plt.show(block=not WITHDISPLAY)
+plt.show(block=not (WITHDISPLAY or WITHVIDEO))
 
 # Displaying the motion in Meshcat
-if WITHDISPLAY:
+if WITHDISPLAY or WITHVIDEO:
     viz = MeshcatVisualizer(model, collision_model, visual_model)
-    viz.initViewer(open=True)
+    viz.initViewer(open=WITHDISPLAY)
     viz.loadViewerModel()
     viz.display(q0)
 
     qs = [x[: model.nq] for x in solver.xs]
     pause = 2.0
+    frame_dir = None
+    frame_idx = 0
+    if WITHVIDEO:
+        frame_dir = os.path.join(
+            os.path.dirname(__file__), "..", "output", "rss_reach_frames"
+        )
+        os.makedirs(frame_dir, exist_ok=True)
+        print(f"Saving frames to {os.path.abspath(frame_dir)}")
+        print(
+            "Create video with:\n"
+            f"  ffmpeg -y -framerate {1 / dt:.0f} "
+            f"-i {os.path.abspath(frame_dir)}/frame_%06d.png "
+            "-c:v libx264 -pix_fmt yuv420p rss_reach.mp4"
+        )
+
+    save_frames = WITHVIDEO
     while True:
         for q in qs:
             viz.display(q)
+            if save_frames:
+                plt.imsave(
+                    os.path.join(frame_dir, f"frame_{frame_idx:06d}.png"),
+                    viz.captureImage(),
+                )
+                frame_idx += 1
             time.sleep(dt)
+        save_frames = False
         time.sleep(pause)
