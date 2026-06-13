@@ -321,7 +321,8 @@ liftBarrierCost = crocoddyl.CostModelResidual(
 # Setting up the running and terminal cost models
 # ====================================================================
 
-dt = 1e-2
+CONTROL_HZ = 250
+dt = 1.0 / CONTROL_HZ
 
 runningCostModel = crocoddyl.CostModelSum(state, nu)
 runningCostModel.addCost("uReg", uRegCost, 1 / dt)
@@ -349,7 +350,8 @@ terminalModel = crocoddyl.IntegratedActionModelEuler(
 # Creating the shooting problem and the solver
 # ====================================================================
 
-T = 500
+HORIZON_S = 5.0
+T = int(round(HORIZON_S / dt))
 x0 = state.zero()
 x0[: model.nq] = q0
 problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
