@@ -2,6 +2,7 @@
 import argparse
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -83,7 +84,13 @@ def parse_args(argv=None):
         "--out-dir",
         type=str,
         default=None,
-        help="Output directory (single-mass runs only; batch uses output/mass_{kg}kg_{stamp}/)",
+        help="Output directory (single-mass runs only)",
+    )
+    parser.add_argument(
+        "--batch-dir",
+        type=str,
+        default=None,
+        help="Batch output root; each mass writes to {batch-dir}/mass_{kg}kg/",
     )
     args = parser.parse_args(argv)
     if args.mass_kg is None:
@@ -871,40 +878,58 @@ def _init_ee_goal_marker(viz, goal_pos, radius):
     viz.viewer["chewie_ee_goal"].set_transform(tf.translation_matrix(goal_pos))
 
 
+def _encode_video(frame_dir, mp4_path, fps):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        f"{fps:.0f}",
+        "-i",
+        os.path.join(frame_dir, "frame_%06d.png"),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        mp4_path,
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    print(f"Saved video to {os.path.abspath(mp4_path)}")
+
+
 def display_motion(solver, model, collision_model, visual_model, out_dir, dt, with_display, with_video):
     viz = MeshcatVisualizer(model, collision_model, visual_model)
-    viz.initViewer(open=with_display)
+    # captureImage() needs a live Meshcat viewer; open browser for video even without display loop.
+    viz.initViewer(open=with_display or with_video)
     viz.loadViewerModel()
     _init_ee_goal_marker(viz, CHEWIE_EE_POS_ENV, 0.05)
-    viz.display(solver.xs[0][: model.nq])
 
     qs = [x[: model.nq] for x in solver.xs]
-    pause = 2.0
-    frame_dir = None
-    frame_idx = 0
+    fps = 1.0 / dt
+
     if with_video:
         frame_dir = os.path.join(out_dir, "frames")
         os.makedirs(frame_dir, exist_ok=True)
-        print(f"Saving frames to {os.path.abspath(frame_dir)}")
-        print(
-            "Create video with:\n"
-            f"  ffmpeg -y -framerate {1 / dt:.0f} "
-            f"-i {os.path.abspath(frame_dir)}/frame_%06d.png "
-            f"-c:v libx264 -pix_fmt yuv420p {os.path.abspath(out_dir)}/rss_reach.mp4"
-        )
+        n_frames = len(qs)
+        print(f"Capturing {n_frames} frames to {os.path.abspath(frame_dir)}")
+        for frame_idx, q in enumerate(qs):
+            viz.display(q)
+            plt.imsave(
+                os.path.join(frame_dir, f"frame_{frame_idx:06d}.png"),
+                viz.captureImage(),
+            )
+            if frame_idx % 50 == 0 or frame_idx == n_frames - 1:
+                print(f"  frame {frame_idx + 1}/{n_frames}")
+        mp4_path = os.path.join(out_dir, "rss_reach.mp4")
+        _encode_video(frame_dir, mp4_path, fps)
 
-    save_frames = with_video
+    if not with_display:
+        return
+
+    pause = 2.0
     while True:
         for q in qs:
             viz.display(q)
-            if save_frames:
-                plt.imsave(
-                    os.path.join(frame_dir, f"frame_{frame_idx:06d}.png"),
-                    viz.captureImage(),
-                )
-                frame_idx += 1
             time.sleep(dt)
-        save_frames = False
         time.sleep(pause)
 
 
@@ -930,6 +955,7 @@ def write_batch_readme(batch_root, mass_dirs):
         "| `base_motion.csv` | Expected platform position, linear vel, RPY, angular vel |",
         "| `com_ee_tracking.csv` | COM, EE position, EE tracking error |",
         "| `sim_parameters.md` | Problem setup, mass/inertia, cost weights |",
+        "| `rss_reach.mp4` | Meshcat animation (when run with `video`) |",
         "",
         "## Folders",
         "",
@@ -1007,10 +1033,15 @@ def main(argv=None):
     with_video = "video" in args.modes
 
     batch_stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    is_batch = len(args.mass_kg) > 1
-    batch_root = os.path.join(SCRIPT_DIR, "..", "output", f"batch_{batch_stamp}")
-    if is_batch:
+    is_batch = len(args.mass_kg) > 1 or args.batch_dir is not None
+    if args.batch_dir:
+        batch_root = os.path.abspath(args.batch_dir)
         os.makedirs(batch_root, exist_ok=True)
+    elif is_batch:
+        batch_root = os.path.join(SCRIPT_DIR, "..", "output", f"batch_{batch_stamp}")
+        os.makedirs(batch_root, exist_ok=True)
+    else:
+        batch_root = None
     mass_dirs = []
 
     warm_xs = None
@@ -1021,15 +1052,19 @@ def main(argv=None):
         if args.out_dir and not is_batch:
             out_dir = args.out_dir
             os.makedirs(out_dir, exist_ok=True)
-        elif is_batch:
+        elif batch_root is not None:
             out_dir = _make_output_dir(mass_kg, batch_root=batch_root)
         else:
             out_dir = _make_output_dir(mass_kg, batch_stamp)
 
-        do_display = with_display and len(args.mass_kg) == 1
-        do_video = with_video and len(args.mass_kg) == 1
-        if with_display and len(args.mass_kg) > 1 and idx == len(args.mass_kg) - 1:
-            print("Skipping Meshcat display for batch run (use single --mass-kg with display).")
+        # Video runs for every mass (opens Meshcat briefly per mass); display loop is single-mass only.
+        do_display = with_display and not is_batch
+        do_video = with_video
+        if with_display and is_batch and idx == 0:
+            print(
+                "Skipping interactive Meshcat loop for batch run "
+                "(use video to save mp4 per mass, or single --mass-kg with display)."
+            )
 
         solver, out_dir = run_single_mass(
             mass_kg,
@@ -1046,7 +1081,7 @@ def main(argv=None):
         last_solver = solver
         mass_dirs.append((mass_kg, out_dir))
 
-    if is_batch and with_plot:
+    if batch_root is not None and with_plot:
         write_batch_readme(batch_root, mass_dirs)
         print(f"\nBatch outputs under: {os.path.abspath(batch_root)}")
 
