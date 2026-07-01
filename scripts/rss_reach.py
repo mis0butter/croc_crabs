@@ -1,4 +1,5 @@
 # ref. https://github.com/PyCQA/pycodestyle/issues/373, remove this for ruff
+import argparse
 import os
 import signal
 import sys
@@ -18,48 +19,18 @@ from pinocchio import JointModelFreeFlyer
 import crocoddyl
 
 # ====================================================================
-# Loading the RSS chaser robot model
+# Constants
 # ====================================================================
 
-# argument handling
-WITHDISPLAY = "display" in sys.argv or "CROCODDYL_DISPLAY" in os.environ
-WITHVIDEO = "video" in sys.argv
-WITHPLOT = "plot" in sys.argv or "CROCODDYL_PLOT" in os.environ
-signal.signal(signal.SIGINT, signal.SIG_DFL)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(SCRIPT_DIR, "..", "rss_platform")
+URDF_PATH = os.path.join(MODEL_DIR, "sim_chaser.urdf")
+PACKAGE_DIRS = [MODEL_DIR]
 
-# Define paths
-model_dir = os.path.join(os.path.dirname(__file__), "..", "rss_platform")
-urdf_path = os.path.join(model_dir, "sim_chaser.urdf")
-package_dirs = [model_dir]
-
-# Pinocchio adds a free flyer at the root. The URDF also has a floating
-# slide_optical_plate joint; fix it here so actuation applies to the arms only.
-urdf_text = open(urdf_path).read()
-urdf_text = urdf_text.replace(
-    'name="slide_optical_plate_joint" type="floating"',
-    'name="slide_optical_plate_joint" type="fixed"',
-)
-with tempfile.NamedTemporaryFile(suffix=".urdf", mode="w", delete=False) as tmp:
-    tmp.write(urdf_text)
-    urdf_load_path = tmp.name
-
-# Load model + visuals
-model, collision_model, visual_model = pinocchio.buildModelsFromUrdf(
-    urdf_load_path, package_dirs, JointModelFreeFlyer()
-)
-
-# turn off gravity!
-model.gravity.linear[:] = 0.0
-
-# Create data, state, actuation models
-data = model.createData()
-state = crocoddyl.StateMultibody(model)
-# Root free flyer is unactuated; arm joints are actuated.
-actuation = crocoddyl.ActuationModelFloatingBase(state)
-
-# ====================================================================
-# Initial arm pose [rad]
-# ====================================================================
+CONTROL_HZ = 50
+HORIZON_S = 5.0
+CHEWIE_EE_FRAME = "chewie_tool0"
+CHEWIE_EE_POS_ENV = np.array([2.0, 0.0, 0.0])
 
 ARM_INIT_POS = {
     # Han: tucked pose for base stabilization
@@ -82,21 +53,51 @@ ARM_INIT_POS = {
     "chewie_gripper_finger2_joint": 0.0,
 }
 
-q0 = pinocchio.neutral(model)
-for joint_name, angle in ARM_INIT_POS.items():
-    q0[model.joints[model.getJointId(joint_name)].idx_q] = angle
-
 HAN_JOINTS = [name for name in ARM_INIT_POS if name.startswith("han_")]
 CHEWIE_JOINTS = [name for name in ARM_INIT_POS if name.startswith("chewie_")]
+
+VSTOP_COST_WEIGHT = 1e4
+VSTOP_ACTIVATION_WEIGHT = 1e2
 
 
 def _joint_label(joint_name):
     return joint_name.replace("han_", "").replace("chewie_", "").replace("_joint", "")
 
 
-def _make_output_dir():
-    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    out_dir = os.path.join(os.path.dirname(__file__), "..", "output", stamp)
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="RSS Chewie reach trajectory optimization")
+    parser.add_argument(
+        "modes",
+        nargs="*",
+        choices=["plot", "display", "video"],
+        help="plot: save CSVs/figures; display: Meshcat; video: capture frames",
+    )
+    parser.add_argument(
+        "--mass-kg",
+        type=float,
+        nargs="+",
+        default=None,
+        help="armed_mockup mass [kg]; default 5000; pass multiple for batch",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Output directory (single-mass runs only; batch uses output/mass_{kg}kg_{stamp}/)",
+    )
+    args = parser.parse_args(argv)
+    if args.mass_kg is None:
+        args.mass_kg = [5000.0]
+    return args
+
+
+def _make_output_dir(mass_kg, batch_stamp=None, batch_root=None):
+    mass_label = f"{mass_kg:g}".replace(".", "p")
+    if batch_root is not None:
+        out_dir = os.path.join(batch_root, f"mass_{mass_label}kg")
+    else:
+        stamp = batch_stamp or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        out_dir = os.path.join(SCRIPT_DIR, "..", "output", f"mass_{mass_label}kg_{stamp}")
     os.makedirs(out_dir, exist_ok=True)
     return out_dir
 
@@ -107,48 +108,6 @@ def _write_csv(path, columns, rows):
         f.write(header + "\n")
         for row in rows:
             f.write(",".join(f"{val:.9g}" for val in row) + "\n")
-
-
-def _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal):
-    times = np.arange(len(xs)) * dt
-    positions = {name: [] for name in ARM_INIT_POS}
-    velocities = {name: [] for name in ARM_INIT_POS}
-    ee_errors = []
-    ee_pos = []
-    base_rpy = []
-    base_omega = []
-    com_pos = []
-
-    for x in xs:
-        q = x[: model.nq]
-        v = x[model.nq :]
-        for joint_name in ARM_INIT_POS:
-            jid = model.getJointId(joint_name)
-            positions[joint_name].append(q[model.joints[jid].idx_q])
-            velocities[joint_name].append(v[model.joints[jid].idx_v])
-
-        pinocchio.forwardKinematics(model, data, q)
-        pinocchio.centerOfMass(model, data, q)
-        pinocchio.updateFramePlacement(model, data, ee_frame_id)
-        ee_position = data.oMf[ee_frame_id].translation.copy()
-        ee_errors.append(np.linalg.norm(ee_position - ee_goal))
-        ee_pos.append(ee_position)
-
-        quat = pinocchio.Quaternion(q[6], q[3], q[4], q[5])
-        base_rpy.append(pinocchio.rpy.matrixToRpy(quat.toRotationMatrix()))
-        base_omega.append(v[3:6])
-        com_pos.append(data.com[0].copy())
-
-    return {
-        "times": times,
-        "positions": {name: np.asarray(vals) for name, vals in positions.items()},
-        "velocities": {name: np.asarray(vals) for name, vals in velocities.items()},
-        "ee_errors": np.asarray(ee_errors),
-        "ee_pos": np.asarray(ee_pos),
-        "base_rpy": np.asarray(base_rpy),
-        "base_omega": np.asarray(base_omega),
-        "com_pos": np.asarray(com_pos),
-    }
 
 
 def parse_urdf_joint_limits(urdf_path, joint_names):
@@ -188,6 +147,303 @@ def parse_armed_mockup_inertial(urdf_path):
             "izz": float(inertia.get("izz")),
         }
     return None
+
+
+def patch_urdf_for_load(mass_kg=None):
+    """Patch sim_chaser.urdf: fix slide joint, optionally scale armed_mockup mass/inertia."""
+    urdf_text = open(URDF_PATH).read()
+    urdf_text = urdf_text.replace(
+        'name="slide_optical_plate_joint" type="floating"',
+        'name="slide_optical_plate_joint" type="fixed"',
+    )
+
+    if mass_kg is not None:
+        baseline = parse_armed_mockup_inertial(URDF_PATH)
+        if baseline is None:
+            raise RuntimeError("armed_mockup inertial not found in URDF")
+        scale = mass_kg / baseline["mass_kg"]
+        root = ET.fromstring(urdf_text)
+        for link in root.findall("link"):
+            if link.get("name") != "armed_mockup":
+                continue
+            inertial = link.find("inertial")
+            mass_el = inertial.find("mass")
+            inertia_el = inertial.find("inertia")
+            mass_el.set("value", f"{mass_kg:g}")
+            for attr in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz"):
+                inertia_el.set(attr, f"{float(inertia_el.get(attr)) * scale:.9g}")
+            break
+        urdf_text = ET.tostring(root, encoding="unicode")
+
+    with tempfile.NamedTemporaryFile(suffix=".urdf", mode="w", delete=False) as tmp:
+        tmp.write(urdf_text)
+        return tmp.name
+
+
+def load_model(mass_kg=None):
+    urdf_load_path = patch_urdf_for_load(mass_kg)
+    model, collision_model, visual_model = pinocchio.buildModelsFromUrdf(
+        urdf_load_path, PACKAGE_DIRS, JointModelFreeFlyer()
+    )
+    model.gravity.linear[:] = 0.0
+    return model, collision_model, visual_model, urdf_load_path
+
+
+def _initial_configuration(model):
+    q0 = pinocchio.neutral(model)
+    for joint_name, angle in ARM_INIT_POS.items():
+        q0[model.joints[model.getJointId(joint_name)].idx_q] = angle
+    return q0
+
+
+def build_problem(model, q0):
+    data = model.createData()
+    state = crocoddyl.StateMultibody(model)
+    actuation = crocoddyl.ActuationModelFloatingBase(state)
+    nu = state.nv
+
+    ee_frame_id = model.getFrameId(CHEWIE_EE_FRAME)
+    ee_residual = crocoddyl.ResidualModelFrameTranslation(
+        state, ee_frame_id, CHEWIE_EE_POS_ENV, nu
+    )
+    ee_activation = crocoddyl.ActivationModelQuad(3)
+    ee_cost = crocoddyl.CostModelResidual(state, ee_activation, ee_residual)
+    ee_run_cost = crocoddyl.CostModelResidual(state, ee_activation, ee_residual)
+
+    w_u = np.ones(actuation.nu) * 0.01
+    u_residual = crocoddyl.ResidualModelJointEffort(
+        state, actuation, np.zeros(actuation.nu), nu, False
+    )
+    u_reg_cost = crocoddyl.CostModelResidual(
+        state, crocoddyl.ActivationModelWeightedQuad(w_u), u_residual
+    )
+
+    x_ref = state.zero()
+    x_ref[: model.nq] = q0
+    w_base = np.zeros(state.ndx)
+    w_base[0:3] = 1e2
+    w_base[state.nv : state.nv + 3] = 10
+    w_base[state.nv + 6 :] = 10
+    base_run_residual = crocoddyl.ResidualModelState(state, x_ref, nu)
+    base_run_activation = crocoddyl.ActivationModelWeightedQuad(w_base)
+    base_run_cost = crocoddyl.CostModelResidual(
+        state, base_run_activation, base_run_residual
+    )
+
+    lift_jid = model.getJointId("chewie_shoulder_lift_joint")
+    lift_idx_q = model.joints[lift_jid].idx_q
+    lift_idx_v = model.joints[lift_jid].idx_v
+
+    x_lift_ref = state.zero()
+    x_lift_ref[: model.nq] = q0
+    lift_lower = np.full(state.ndx, -np.inf)
+    lift_upper = np.full(state.ndx, np.inf)
+    lift_lower[lift_idx_v] = 0.0
+    lift_barrier_residual = crocoddyl.ResidualModelState(state, x_lift_ref, nu)
+    lift_barrier_activation = crocoddyl.ActivationModelQuadraticBarrier(
+        crocoddyl.ActivationBounds(lift_lower, lift_upper)
+    )
+    lift_barrier_cost = crocoddyl.CostModelResidual(
+        state, lift_barrier_activation, lift_barrier_residual
+    )
+
+    x_term_ref = state.zero()
+    w_term = np.zeros(state.ndx)
+    w_term[state.nv :] = VSTOP_ACTIVATION_WEIGHT
+    vstop_residual = crocoddyl.ResidualModelState(state, x_term_ref, nu)
+    vstop_activation = crocoddyl.ActivationModelWeightedQuad(w_term)
+    vstop_cost = crocoddyl.CostModelResidual(state, vstop_activation, vstop_residual)
+
+    dt = 1.0 / CONTROL_HZ
+    running_cost_model = crocoddyl.CostModelSum(state, nu)
+    running_cost_model.addCost("uReg", u_reg_cost, 1 / dt)
+    running_cost_model.addCost("baseRun", base_run_cost, 10.0)
+    running_cost_model.addCost("eeRun", ee_run_cost, 10.0)
+    running_cost_model.addCost("chewieLiftBarrier", lift_barrier_cost, 1e3)
+
+    terminal_cost_model = crocoddyl.CostModelSum(state, nu)
+    terminal_cost_model.addCost("ee", ee_cost, 1e6)
+    terminal_cost_model.addCost("vStop", vstop_cost, VSTOP_COST_WEIGHT)
+
+    running_model = crocoddyl.IntegratedActionModelEuler(
+        crocoddyl.DifferentialActionModelFreeInvDynamics(
+            state, actuation, running_cost_model
+        ),
+        dt,
+    )
+    terminal_model = crocoddyl.IntegratedActionModelEuler(
+        crocoddyl.DifferentialActionModelFreeInvDynamics(
+            state, actuation, terminal_cost_model
+        ),
+        dt,
+    )
+
+    T = int(round(HORIZON_S / dt))
+    x0 = state.zero()
+    x0[: model.nq] = q0
+    problem = crocoddyl.ShootingProblem(x0, [running_model] * T, terminal_model)
+
+    sim_params = {
+        "control_hz": CONTROL_HZ,
+        "dt": dt,
+        "horizon_s": HORIZON_S,
+        "T": T,
+        "gravity": model.gravity.linear.copy(),
+        "ee_frame": CHEWIE_EE_FRAME,
+        "ee_goal": CHEWIE_EE_POS_ENV,
+        "running_costs": [
+            {
+                "name": "uReg",
+                "weight": 1 / dt,
+                "description": "Actuation regularization (WeightedQuad, w_u=0.01 per joint)",
+            },
+            {
+                "name": "baseRun",
+                "weight": 10.0,
+                "description": "Track initial base pose and damp base/arm joint velocities",
+            },
+            {
+                "name": "eeRun",
+                "weight": 10.0,
+                "description": f"Running EE position tracking ({CHEWIE_EE_FRAME})",
+            },
+            {
+                "name": "chewieLiftBarrier",
+                "weight": 1e3,
+                "description": "One-sided barrier: chewie shoulder_lift >= start angle",
+            },
+        ],
+        "terminal_costs": [
+            {
+                "name": "ee",
+                "weight": 1e6,
+                "description": f"Terminal EE position tracking ({CHEWIE_EE_FRAME})",
+            },
+            {
+                "name": "vStop",
+                "weight": VSTOP_COST_WEIGHT,
+                "description": "Terminal zero velocity (base + all arm joints)",
+            },
+        ],
+        "w_u": w_u,
+        "w_base_position": w_base[0],
+        "w_base_lin_vel": w_base[state.nv],
+        "w_base_joint_vel": w_base[state.nv + 6],
+        "w_term_vel": VSTOP_ACTIVATION_WEIGHT,
+        "lift_barrier_lower": lift_lower[lift_idx_v],
+    }
+
+    return {
+        "data": data,
+        "state": state,
+        "actuation": actuation,
+        "problem": problem,
+        "dt": dt,
+        "T": T,
+        "x0": x0,
+        "q0": q0,
+        "ee_frame_id": ee_frame_id,
+        "lift_idx_q": lift_idx_q,
+        "lift_idx_v": lift_idx_v,
+        "sim_params": sim_params,
+    }
+
+
+def solve_reach(problem_setup, warm_xs=None, warm_us=None, verbose=True):
+    problem = problem_setup["problem"]
+    solver = crocoddyl.SolverIntro(problem)
+    if verbose:
+        solver.setCallbacks([crocoddyl.CallbackVerbose()])
+
+    T = problem_setup["T"]
+    x0 = problem_setup["x0"]
+    q0 = problem_setup["q0"]
+    lift_idx_q = problem_setup["lift_idx_q"]
+
+    if warm_xs is not None and warm_us is not None:
+        xs_init = [x.copy() for x in warm_xs]
+        us_init = [u.copy() for u in warm_us]
+    else:
+        xs_init = [x0.copy() for _ in range(T + 1)]
+        for k, x in enumerate(xs_init):
+            x[lift_idx_q] = q0[lift_idx_q] + 2.0 * (k / T)
+        us_init = problem.quasiStatic([x for x in xs_init[:-1]])
+
+    solver.solve(xs_init, us_init)
+    return solver
+
+
+def print_solution_summary(solver, model, data, problem_setup):
+    q0 = problem_setup["q0"]
+    ee_frame_id = problem_setup["ee_frame_id"]
+    lift_idx_q = problem_setup["lift_idx_q"]
+
+    q_final = solver.xs[-1][: model.nq]
+    v_final = solver.xs[-1][model.nq :]
+    pinocchio.forwardKinematics(model, data, q_final)
+    pinocchio.updateFramePlacement(model, data, ee_frame_id)
+    ee_final = data.oMf[ee_frame_id].translation.copy()
+
+    print(f"Target {CHEWIE_EE_FRAME} position: {CHEWIE_EE_POS_ENV}")
+    print(f"Final   {CHEWIE_EE_FRAME} position: {ee_final}")
+    print(f"Position error [m]: {np.linalg.norm(ee_final - CHEWIE_EE_POS_ENV):.4f}")
+    print(f"Base position drift [m]: {np.linalg.norm(q_final[:3] - q0[:3]):.4f}")
+    print(f"Base orientation drift [quat]: {q_final[3:7] - q0[3:7]}")
+    print(f"Final velocity norm: {np.linalg.norm(v_final):.6e}")
+
+    lift_traj = np.array([x[lift_idx_q] for x in solver.xs])
+    print(
+        f"chewie shoulder_lift: start={lift_traj[0]:.3f} "
+        f"min={lift_traj.min():.3f} max={lift_traj.max():.3f} end={lift_traj[-1]:.3f}"
+    )
+
+
+def _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal):
+    times = np.arange(len(xs)) * dt
+    positions = {name: [] for name in ARM_INIT_POS}
+    velocities = {name: [] for name in ARM_INIT_POS}
+    ee_errors = []
+    ee_pos = []
+    base_rpy = []
+    base_omega = []
+    base_pos = []
+    base_lin_vel = []
+    com_pos = []
+
+    for x in xs:
+        q = x[: model.nq]
+        v = x[model.nq :]
+        for joint_name in ARM_INIT_POS:
+            jid = model.getJointId(joint_name)
+            positions[joint_name].append(q[model.joints[jid].idx_q])
+            velocities[joint_name].append(v[model.joints[jid].idx_v])
+
+        pinocchio.forwardKinematics(model, data, q)
+        pinocchio.centerOfMass(model, data, q)
+        pinocchio.updateFramePlacement(model, data, ee_frame_id)
+        ee_position = data.oMf[ee_frame_id].translation.copy()
+        ee_errors.append(np.linalg.norm(ee_position - ee_goal))
+        ee_pos.append(ee_position)
+
+        quat = pinocchio.Quaternion(q[6], q[3], q[4], q[5])
+        base_rpy.append(pinocchio.rpy.matrixToRpy(quat.toRotationMatrix()))
+        base_omega.append(v[3:6].copy())
+        base_pos.append(q[0:3].copy())
+        base_lin_vel.append(v[0:3].copy())
+        com_pos.append(data.com[0].copy())
+
+    return {
+        "times": times,
+        "positions": {name: np.asarray(vals) for name, vals in positions.items()},
+        "velocities": {name: np.asarray(vals) for name, vals in velocities.items()},
+        "ee_errors": np.asarray(ee_errors),
+        "ee_pos": np.asarray(ee_pos),
+        "base_rpy": np.asarray(base_rpy),
+        "base_omega": np.asarray(base_omega),
+        "base_pos": np.asarray(base_pos),
+        "base_lin_vel": np.asarray(base_lin_vel),
+        "com_pos": np.asarray(com_pos),
+    }
 
 
 def _csv_cell(value):
@@ -290,6 +546,10 @@ def _save_sim_parameters(out_dir, urdf_path, sim_params):
             f"- w_base[nv:nv+3] base linear velocity: {sim_params['w_base_lin_vel']}",
             f"- w_base[nv+6:] arm joint velocities: {sim_params['w_base_joint_vel']}",
             "",
+            "### Terminal zero velocity (`vStop`)",
+            "",
+            f"- w_term[nv:] all velocity components: {sim_params['w_term_vel']}",
+            "",
             "### Chewie lift barrier (`chewieLiftBarrier`)",
             "",
             f"- lower bound on chewie_shoulder_lift velocity index: {sim_params['lift_barrier_lower']}",
@@ -303,6 +563,7 @@ def _save_sim_parameters(out_dir, urdf_path, sim_params):
             ("activation", "w_base_position", sim_params["w_base_position"]),
             ("activation", "w_base_lin_vel", sim_params["w_base_lin_vel"]),
             ("activation", "w_base_joint_vel", sim_params["w_base_joint_vel"]),
+            ("activation", "w_term_vel", sim_params["w_term_vel"]),
             ("activation", "lift_barrier_lower", sim_params["lift_barrier_lower"]),
         ]
     )
@@ -429,6 +690,12 @@ def _save_base_figure(out_dir, traj, q_ref):
 
     csv_columns = [
         "time_s",
+        "base_x",
+        "base_y",
+        "base_z",
+        "base_vx",
+        "base_vy",
+        "base_vz",
         "base_roll",
         "base_pitch",
         "base_yaw",
@@ -437,30 +704,52 @@ def _save_base_figure(out_dir, traj, q_ref):
         "base_wz",
     ]
     csv_rows = [
-        [t, *traj["base_rpy"][k], *traj["base_omega"][k]]
+        [
+            t,
+            *traj["base_pos"][k],
+            *traj["base_lin_vel"][k],
+            *traj["base_rpy"][k],
+            *traj["base_omega"][k],
+        ]
         for k, t in enumerate(times)
     ]
 
-    fig, (ax_ori, ax_ang) = plt.subplots(1, 2, figsize=(12, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7))
+
+    pos_labels = ["x", "y", "z"]
+    for i, label in enumerate(pos_labels):
+        axes[0, 0].plot(times, traj["base_pos"][:, i], label=label)
+        axes[0, 0].axhline(q_ref[i], color=f"C{i}", ls=":", lw=1, alpha=0.7)
+    axes[0, 0].set_ylabel("position [m]")
+    axes[0, 0].set_title("Base position")
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend(ncol=3, fontsize=8)
+
+    for i, label in enumerate(pos_labels):
+        axes[0, 1].plot(times, traj["base_lin_vel"][:, i], label=f"v{label}")
+    axes[0, 1].set_ylabel("velocity [m/s]")
+    axes[0, 1].set_title("Base linear velocity")
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].legend(ncol=3, fontsize=8)
 
     rpy_labels = ["roll", "pitch", "yaw"]
     for i, label in enumerate(rpy_labels):
-        ax_ori.plot(times, traj["base_rpy"][:, i], label=label)
-        ax_ori.axhline(rpy_ref[i], color=f"C{i}", ls=":", lw=1, alpha=0.7)
-    ax_ori.set_xlabel("time [s]")
-    ax_ori.set_ylabel("orientation [rad]")
-    ax_ori.set_title("Base orientation (RPY)")
-    ax_ori.grid(True, alpha=0.3)
-    ax_ori.legend(ncol=3, fontsize=8)
+        axes[1, 0].plot(times, traj["base_rpy"][:, i], label=label)
+        axes[1, 0].axhline(rpy_ref[i], color=f"C{i}", ls=":", lw=1, alpha=0.7)
+    axes[1, 0].set_xlabel("time [s]")
+    axes[1, 0].set_ylabel("orientation [rad]")
+    axes[1, 0].set_title("Base orientation (RPY)")
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].legend(ncol=3, fontsize=8)
 
     omega_labels = ["wx", "wy", "wz"]
     for i, label in enumerate(omega_labels):
-        ax_ang.plot(times, traj["base_omega"][:, i], label=label)
-    ax_ang.set_xlabel("time [s]")
-    ax_ang.set_ylabel("angular velocity [rad/s]")
-    ax_ang.set_title("Base angular velocity")
-    ax_ang.grid(True, alpha=0.3)
-    ax_ang.legend(ncol=3, fontsize=8)
+        axes[1, 1].plot(times, traj["base_omega"][:, i], label=label)
+    axes[1, 1].set_xlabel("time [s]")
+    axes[1, 1].set_ylabel("angular velocity [rad/s]")
+    axes[1, 1].set_title("Base angular velocity")
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].legend(ncol=3, fontsize=8)
 
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "base_motion.png"), dpi=150, bbox_inches="tight")
@@ -468,7 +757,7 @@ def _save_base_figure(out_dir, traj, q_ref):
     plt.close(fig)
 
 
-def _save_com_ee_figure(out_dir, traj, ee_goal):
+def _save_com_ee_figure(out_dir, traj, ee_goal, ee_frame_name):
     times = traj["times"]
     com = traj["com_pos"]
     ee = traj["ee_pos"]
@@ -520,7 +809,7 @@ def _save_com_ee_figure(out_dir, traj, ee_goal):
         times,
         traj["ee_errors"],
         color="tab:purple",
-        label=f"||p_ee - p_goal|| ({CHEWIE_EE_FRAME})",
+        label=f"||p_ee - p_goal|| ({ee_frame_name})",
     )
     ax_err.set_xlabel("time [s]")
     ax_err.set_ylabel("error [m]")
@@ -559,15 +848,17 @@ def _save_com_ee_figure(out_dir, traj, ee_goal):
     plt.close(fig)
 
 
-def save_rss_reach_outputs(xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urdf_path, out_dir, sim_params):
+def save_rss_reach_outputs(
+    xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urdf_path, out_dir, sim_params
+):
     traj = _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal)
-    limits = parse_urdf_joint_limits(urdf_path, list(ARM_INIT_POS.keys()))
+    limits = parse_urdf_joint_limits(URDF_PATH, list(ARM_INIT_POS.keys()))
     _save_arm_joint_figure(out_dir, traj, limits, "han", HAN_JOINTS, "tab:blue", "-")
     _save_arm_joint_figure(
         out_dir, traj, limits, "chewie", CHEWIE_JOINTS, "tab:red", "-"
     )
     _save_base_figure(out_dir, traj, q_ref)
-    _save_com_ee_figure(out_dir, traj, ee_goal)
+    _save_com_ee_figure(out_dir, traj, ee_goal, sim_params["ee_frame"])
     _save_sim_parameters(out_dir, urdf_path, sim_params)
     print(f"Saved figures and CSVs to {os.path.abspath(out_dir)}")
 
@@ -580,221 +871,18 @@ def _init_ee_goal_marker(viz, goal_pos, radius):
     viz.viewer["chewie_ee_goal"].set_transform(tf.translation_matrix(goal_pos))
 
 
-# ====================================================================
-# Defining the reach goal (position only)
-# ====================================================================
-
-nu = state.nv  # cost/control dimension expected by crocoddyl cost sums
-
-# Chewie end-effector frame and desired position in the env / world frame.
-CHEWIE_EE_FRAME = "chewie_tool0"
-CHEWIE_EE_ID = model.getFrameId(CHEWIE_EE_FRAME)
-CHEWIE_EE_POS_ENV = np.array([2.0, 0.0, 0.0])
-
-eeResidual = crocoddyl.ResidualModelFrameTranslation(
-    state, CHEWIE_EE_ID, CHEWIE_EE_POS_ENV, nu
-)
-eeActivation = crocoddyl.ActivationModelQuad(3)
-eeCost = crocoddyl.CostModelResidual(state, eeActivation, eeResidual)
-eeRunCost = crocoddyl.CostModelResidual(state, eeActivation, eeResidual)
-
-# ====================================================================
-# Setting up the running state and control cost models
-# ====================================================================
-
-# Actuation layout (16): chewie arm+gripper [0:8], han arm+gripper [8:16].
-# Both arms may actuate; Han is steered by the running base-stabilization cost.
-w_u = np.ones(actuation.nu) * 0.01
-uResidual = crocoddyl.ResidualModelJointEffort(
-    state, actuation, np.zeros(actuation.nu), nu, False
-)
-uRegCost = crocoddyl.CostModelResidual(
-    state, crocoddyl.ActivationModelWeightedQuad(w_u), uResidual
-)
-
-# Running-only: damp base translation and joint velocities; Han compensates via
-# base position tracking. Base orientation / angular rate are unconstrained.
-xRef = state.zero()
-xRef[: model.nq] = q0
-w_base = np.zeros(state.ndx)
-w_base[0:3] = 1e2
-w_base[state.nv : state.nv + 3] = 10
-w_base[state.nv + 6 :] = 10
-baseRunResidual = crocoddyl.ResidualModelState(state, xRef, nu)
-baseRunActivation = crocoddyl.ActivationModelWeightedQuad(w_base)
-baseRunCost = crocoddyl.CostModelResidual(state, baseRunActivation, baseRunResidual)
-
-# Chewie's shoulder_lift can reach the goal by folding "down" (decreasing angle)
-# straight through the body/other arm, or by swinging "up and over" (increasing
-# angle). Push the optimizer into the up-and-over homotopy with a one-sided
-# barrier that penalizes the joint dropping below its start angle.
-lift_jid = model.getJointId("chewie_shoulder_lift_joint")
-lift_idx_q = model.joints[lift_jid].idx_q
-lift_idx_v = model.joints[lift_jid].idx_v
-
-xLiftRef = state.zero()
-xLiftRef[: model.nq] = q0  # lift component already sits at its start angle
-liftLower = np.full(state.ndx, -np.inf)
-liftUpper = np.full(state.ndx, np.inf)
-liftLower[lift_idx_v] = 0.0  # residual = q_lift - q_lift_start >= 0
-liftBarrierResidual = crocoddyl.ResidualModelState(state, xLiftRef, nu)
-liftBarrierActivation = crocoddyl.ActivationModelQuadraticBarrier(
-    crocoddyl.ActivationBounds(liftLower, liftUpper)
-)
-liftBarrierCost = crocoddyl.CostModelResidual(
-    state, liftBarrierActivation, liftBarrierResidual
-)
-
-# ====================================================================
-# Setting up the running and terminal cost models
-# ====================================================================
-
-CONTROL_HZ = 50
-dt = 1.0 / CONTROL_HZ
-
-runningCostModel = crocoddyl.CostModelSum(state, nu)
-runningCostModel.addCost("uReg", uRegCost, 1 / dt)
-runningCostModel.addCost("baseRun", baseRunCost, 10.0)
-runningCostModel.addCost("eeRun", eeRunCost, 10.0)
-runningCostModel.addCost("chewieLiftBarrier", liftBarrierCost, 1e3)
-
-terminalCostModel = crocoddyl.CostModelSum(state, nu)
-terminalCostModel.addCost("ee", eeCost, 1e6)
-
-runningModel = crocoddyl.IntegratedActionModelEuler(
-    crocoddyl.DifferentialActionModelFreeInvDynamics(
-        state, actuation, runningCostModel
-    ),
-    dt,
-)
-terminalModel = crocoddyl.IntegratedActionModelEuler(
-    crocoddyl.DifferentialActionModelFreeInvDynamics(
-        state, actuation, terminalCostModel
-    ),
-    dt,
-)
-
-# ====================================================================
-# Creating the shooting problem and the solver
-# ====================================================================
-
-HORIZON_S = 5.0
-T = int(round(HORIZON_S / dt))
-x0 = state.zero()
-x0[: model.nq] = q0
-problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
-solver = crocoddyl.SolverIntro(problem)
-
-solver.setCallbacks([crocoddyl.CallbackVerbose()])
-
-# Warm-start in the "up-and-over" homotopy: seed a trajectory in which Chewie's
-# shoulder_lift ramps upward (increasing angle) rather than folding down through
-# the body. Without this, gradient descent from the default constant guess lands
-# in the fold-down local minimum and merely pays the barrier penalty.
-xs_init = [x0.copy() for _ in range(T + 1)]
-for k, x in enumerate(xs_init):
-    x[lift_idx_q] = q0[lift_idx_q] + 2.0 * (k / T)
-us_init = solver.problem.quasiStatic([x for x in xs_init[:-1]])
-
-# Solving the problem with the solver
-solver.solve(xs_init, us_init)
-
-q_final = solver.xs[-1][: model.nq]
-pinocchio.forwardKinematics(model, data, q_final)
-pinocchio.updateFramePlacement(model, data, CHEWIE_EE_ID)
-ee_final = data.oMf[CHEWIE_EE_ID].translation.copy()
-print(f"Target {CHEWIE_EE_FRAME} position: {CHEWIE_EE_POS_ENV}")
-print(f"Final   {CHEWIE_EE_FRAME} position: {ee_final}")
-print(f"Position error [m]: {np.linalg.norm(ee_final - CHEWIE_EE_POS_ENV):.4f}")
-print(f"Base position drift [m]: {np.linalg.norm(q_final[:3] - q0[:3]):.4f}")
-print(f"Base orientation drift [quat]: {q_final[3:7] - q0[3:7]}")
-
-_lift_traj = np.array([x[lift_idx_q] for x in solver.xs])
-print(
-    f"chewie shoulder_lift: start={_lift_traj[0]:.3f} "
-    f"min={_lift_traj.min():.3f} max={_lift_traj.max():.3f} end={_lift_traj[-1]:.3f}"
-)
-
-# ====================================================================
-# Displaying the motion
-# ====================================================================
-
-# Plotting the entire motion
-out_dir = None
-if WITHPLOT or WITHVIDEO:
-    out_dir = _make_output_dir()
-
-if WITHPLOT:
-    sim_params = {
-        "control_hz": CONTROL_HZ,
-        "dt": dt,
-        "horizon_s": HORIZON_S,
-        "T": T,
-        "gravity": model.gravity.linear.copy(),
-        "ee_frame": CHEWIE_EE_FRAME,
-        "ee_goal": CHEWIE_EE_POS_ENV,
-        "running_costs": [
-            {
-                "name": "uReg",
-                "weight": 1 / dt,
-                "description": "Actuation regularization (WeightedQuad, w_u=0.01 per joint)",
-            },
-            {
-                "name": "baseRun",
-                "weight": 10.0,
-                "description": "Track initial base pose and damp base/arm joint velocities",
-            },
-            {
-                "name": "eeRun",
-                "weight": 10.0,
-                "description": f"Running EE position tracking ({CHEWIE_EE_FRAME})",
-            },
-            {
-                "name": "chewieLiftBarrier",
-                "weight": 1e3,
-                "description": "One-sided barrier: chewie shoulder_lift >= start angle",
-            },
-        ],
-        "terminal_costs": [
-            {
-                "name": "ee",
-                "weight": 1e6,
-                "description": f"Terminal EE position tracking ({CHEWIE_EE_FRAME})",
-            },
-        ],
-        "w_u": w_u,
-        "w_base_position": w_base[0],
-        "w_base_lin_vel": w_base[state.nv],
-        "w_base_joint_vel": w_base[state.nv + 6],
-        "lift_barrier_lower": liftLower[lift_idx_v],
-    }
-    save_rss_reach_outputs(
-        solver.xs,
-        model,
-        data,
-        dt,
-        CHEWIE_EE_ID,
-        CHEWIE_EE_POS_ENV,
-        q0,
-        urdf_path,
-        out_dir,
-        sim_params,
-    )
-
-# Displaying the motion in Meshcat
-if WITHDISPLAY or WITHVIDEO:
+def display_motion(solver, model, collision_model, visual_model, out_dir, dt, with_display, with_video):
     viz = MeshcatVisualizer(model, collision_model, visual_model)
-    viz.initViewer(open=WITHDISPLAY)
+    viz.initViewer(open=with_display)
     viz.loadViewerModel()
-    ee_marker_radius = 0.05
-    _init_ee_goal_marker(viz, CHEWIE_EE_POS_ENV, ee_marker_radius)
-    viz.display(q0)
+    _init_ee_goal_marker(viz, CHEWIE_EE_POS_ENV, 0.05)
+    viz.display(solver.xs[0][: model.nq])
 
     qs = [x[: model.nq] for x in solver.xs]
     pause = 2.0
     frame_dir = None
     frame_idx = 0
-    if WITHVIDEO:
+    if with_video:
         frame_dir = os.path.join(out_dir, "frames")
         os.makedirs(frame_dir, exist_ok=True)
         print(f"Saving frames to {os.path.abspath(frame_dir)}")
@@ -805,7 +893,7 @@ if WITHDISPLAY or WITHVIDEO:
             f"-c:v libx264 -pix_fmt yuv420p {os.path.abspath(out_dir)}/rss_reach.mp4"
         )
 
-    save_frames = WITHVIDEO
+    save_frames = with_video
     while True:
         for q in qs:
             viz.display(q)
@@ -818,3 +906,152 @@ if WITHDISPLAY or WITHVIDEO:
             time.sleep(dt)
         save_frames = False
         time.sleep(pause)
+
+
+def write_batch_readme(batch_root, mass_dirs):
+    readme_path = os.path.join(batch_root, "README_deliverable.md")
+    lines = [
+        "# RSS reach trajectories — mass sweep",
+        "",
+        "Generated by `scripts/rss_reach.py` (Phase 1).",
+        "",
+        "## Mass variants",
+        "",
+        "Each folder uses the same start pose and Chewie EE goal `[2, 0, 0]` m.",
+        "`armed_mockup` inertia is scaled linearly from the 5000 kg box baseline.",
+        "Terminal cost `vStop` drives all velocities to zero at the final timestep.",
+        "",
+        "## Files per mass folder",
+        "",
+        "| File | Description |",
+        "| --- | --- |",
+        "| `han_joints.csv` | Han arm joint position/velocity commands [rad, rad/s] |",
+        "| `chewie_joints.csv` | Chewie arm joint position/velocity commands |",
+        "| `base_motion.csv` | Expected platform position, linear vel, RPY, angular vel |",
+        "| `com_ee_tracking.csv` | COM, EE position, EE tracking error |",
+        "| `sim_parameters.md` | Problem setup, mass/inertia, cost weights |",
+        "",
+        "## Folders",
+        "",
+    ]
+    for mass_kg, out_dir in mass_dirs:
+        rel = os.path.relpath(out_dir, batch_root)
+        lines.append(f"- `{rel}/` — {mass_kg:g} kg")
+    lines.extend(
+        [
+            "",
+            "FTS wrench predictions will follow in Phase 2.",
+            "",
+        ]
+    )
+    with open(readme_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Wrote {os.path.abspath(readme_path)}")
+
+
+def run_single_mass(
+    mass_kg,
+    with_plot,
+    with_display,
+    with_video,
+    out_dir,
+    warm_xs=None,
+    warm_us=None,
+    verbose=True,
+):
+    print(f"\n{'=' * 60}")
+    print(f"Solving reach trajectory: armed_mockup mass = {mass_kg:g} kg")
+    print(f"{'=' * 60}")
+
+    model, collision_model, visual_model, urdf_load_path = load_model(mass_kg)
+    q0 = _initial_configuration(model)
+    problem_setup = build_problem(model, q0)
+    solver = solve_reach(problem_setup, warm_xs, warm_us, verbose=verbose)
+    print_solution_summary(solver, model, problem_setup["data"], problem_setup)
+
+    if with_plot:
+        save_rss_reach_outputs(
+            solver.xs,
+            model,
+            problem_setup["data"],
+            problem_setup["dt"],
+            problem_setup["ee_frame_id"],
+            CHEWIE_EE_POS_ENV,
+            q0,
+            urdf_load_path,
+            out_dir,
+            problem_setup["sim_params"],
+        )
+
+    if with_display or with_video:
+        display_motion(
+            solver,
+            model,
+            collision_model,
+            visual_model,
+            out_dir,
+            problem_setup["dt"],
+            with_display,
+            with_video,
+        )
+
+    return solver, out_dir
+
+
+def main(argv=None):
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    args = parse_args(argv)
+
+    with_plot = "plot" in args.modes or "CROCODDYL_PLOT" in os.environ
+    with_display = "display" in args.modes or "CROCODDYL_DISPLAY" in os.environ
+    with_video = "video" in args.modes
+
+    batch_stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    is_batch = len(args.mass_kg) > 1
+    batch_root = os.path.join(SCRIPT_DIR, "..", "output", f"batch_{batch_stamp}")
+    if is_batch:
+        os.makedirs(batch_root, exist_ok=True)
+    mass_dirs = []
+
+    warm_xs = None
+    warm_us = None
+    last_solver = None
+
+    for idx, mass_kg in enumerate(args.mass_kg):
+        if args.out_dir and not is_batch:
+            out_dir = args.out_dir
+            os.makedirs(out_dir, exist_ok=True)
+        elif is_batch:
+            out_dir = _make_output_dir(mass_kg, batch_root=batch_root)
+        else:
+            out_dir = _make_output_dir(mass_kg, batch_stamp)
+
+        do_display = with_display and len(args.mass_kg) == 1
+        do_video = with_video and len(args.mass_kg) == 1
+        if with_display and len(args.mass_kg) > 1 and idx == len(args.mass_kg) - 1:
+            print("Skipping Meshcat display for batch run (use single --mass-kg with display).")
+
+        solver, out_dir = run_single_mass(
+            mass_kg,
+            with_plot,
+            do_display,
+            do_video,
+            out_dir,
+            warm_xs=warm_xs,
+            warm_us=warm_us,
+            verbose=(idx == 0),
+        )
+        warm_xs = solver.xs
+        warm_us = solver.us
+        last_solver = solver
+        mass_dirs.append((mass_kg, out_dir))
+
+    if is_batch and with_plot:
+        write_batch_readme(batch_root, mass_dirs)
+        print(f"\nBatch outputs under: {os.path.abspath(batch_root)}")
+
+    return last_solver
+
+
+if __name__ == "__main__":
+    main()
