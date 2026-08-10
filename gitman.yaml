@@ -11,4 +11,10 @@ sources:
     type: git
     repo: git@github.com:loco-3d/crocoddyl.git
     rev: devel 
-    path: crocoddyl  # clones into ./crocoddyl 
+    path: crocoddyl  # clones into ./crocoddyl
+
+  - name: rss_platform
+    type: git
+    repo: git@github.com:mis0butter/rss_platform.git
+    rev: main
+    path: rss_platform  # clones into ./rss_platform

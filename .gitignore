@@ -3,3 +3,7 @@ crocoddyl/
 hcrl_crab_robot/
 output/
 *.mp4 
+
+*.cursor 
+__pycache__/
+*.DS_Store 
