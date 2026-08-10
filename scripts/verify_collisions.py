@@ -8,7 +8,7 @@ from pinocchio import JointModelFreeFlyer, GeometryType
 # ==================================================================== 
 
 # Define paths
-model_dir = os.path.join(os.path.dirname(__file__), "..", "hcrl_crab_robot")
+model_dir = os.path.join(os.path.dirname(__file__), "..", "hcrl_crab_robot", "crab")
 urdf_path = os.path.join(model_dir, "crab.urdf")
 
 # Optional: add package directory for meshes
