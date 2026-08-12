@@ -71,7 +71,7 @@ FTS_FRAMES = {
     },
     "chewie_fts_combined": {
         "audit_joint": "chewie_bota_lax_triplet_mount_to_fts_joint",
-        "hardware": "Bota LAX triplet (resolved)",
+        "hardware": "Bota LAX triplet (combined)",
     },
 }
 
@@ -757,7 +757,7 @@ def _save_sim_parameters(out_dir, urdf_path, sim_params):
 
     lines.extend(_fts_convention_lines(sim_params))
     for probe in sim_params.get("fts_probes", []):
-        csv_rows.append(("fts_frame", f"{probe['name']}_distal_mass_kg", probe["distal_mass"]))
+        csv_rows.append(("fts_frame", f"{probe['name']}_arm_mass_kg", probe["distal_mass"]))
         csv_rows.append(
             ("fts_frame", f"{probe['name']}_origin_m", probe["origin_in_base"])
         )
@@ -859,7 +859,7 @@ def _fts_convention_lines(sim_params):
         "gravity-compensated hardware measurement. The final sample repeats the last",
         "commanded acceleration, since there is one more state than control.",
         "",
-        "| frame | hardware | distal mass [kg] | origin in base frame [m] |",
+        "| frame | hardware | arm mass [kg] | origin in base frame [m] |",
         "| --- | --- | ---: | --- |",
     ]
     for probe in probes:
@@ -1260,7 +1260,7 @@ def _save_fts_wrench_outputs(out_dir, traj, probes):
             torque_ax.plot(times, wrench[:, 3 + i], label=comp)
         force_ax.set_title(
             f"{probe['name']} force [N]\n{probe['hardware']}, "
-            f"{probe['distal_mass']:.1f} kg distal"
+            f"{probe['distal_mass']:.1f} kg arm mass"
         )
         force_ax.set_ylabel("force [N]")
         torque_ax.set_title(f"{probe['name']} torque [N m]")
@@ -1271,7 +1271,7 @@ def _save_fts_wrench_outputs(out_dir, traj, probes):
             ax.legend(ncol=3, fontsize=8)
 
     fig.suptitle(
-        "Motion-induced wrench at the FTS mounts (arm on mount, sensor frame axes, zero gravity)",
+        "FTS Wrenches: arm on mount, sensor frame, zero gravity",
         fontsize=14,
         fontweight="bold",
     )

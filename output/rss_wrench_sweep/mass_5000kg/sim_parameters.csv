@@ -13,9 +13,9 @@ armed_mockup_inertial,ixz,0.0
 armed_mockup_inertial,iyy,833.333
 armed_mockup_inertial,iyz,0.0
 armed_mockup_inertial,izz,833.333
-fts_frame,han_fts_distal_mass_kg,72.9217
+fts_frame,han_fts_arm_mass_kg,72.9217
 fts_frame,han_fts_origin_m,[0.2667 0.2921 0.0894]
-fts_frame,chewie_fts_combined_distal_mass_kg,81.0698
+fts_frame,chewie_fts_combined_arm_mass_kg,81.0698
 fts_frame,chewie_fts_combined_origin_m,[ 0.2286 -0.2794  0.0699]
 validation,base_residual_max,3.0093971759015403e-10
 validation,wrench_audit_max_error,3.552713678800501e-15

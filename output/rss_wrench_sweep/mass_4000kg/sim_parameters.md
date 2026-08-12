@@ -28,10 +28,10 @@ wrench is purely motion-induced and is directly comparable to a
 gravity-compensated hardware measurement. The final sample repeats the last
 commanded acceleration, since there is one more state than control.
 
-| frame | hardware | distal mass [kg] | origin in base frame [m] |
+| frame | hardware | arm mass [kg] | origin in base frame [m] |
 | --- | --- | ---: | --- |
 | `han_fts` | ATI Omega191 | 72.9217 | [0.2667 0.2921 0.0894] |
-| `chewie_fts_combined` | Bota LAX triplet (resolved) | 81.0698 | [ 0.2286 -0.2794  0.0699] |
+| `chewie_fts_combined` | Bota LAX triplet (combined) | 81.0698 | [ 0.2286 -0.2794  0.0699] |
 
 ### Column conventions in `<frame>_wrench.csv`
 
