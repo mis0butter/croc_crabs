@@ -60,6 +60,25 @@ CHEWIE_JOINTS = [name for name in ARM_INIT_POS if name.startswith("chewie_")]
 VSTOP_COST_WEIGHT = 1e4
 VSTOP_ACTIVATION_WEIGHT = 1e2
 
+# Force/torque sensor mounts. Both sit between the optical plate and the arm tombstone,
+# so each carries its whole arm. The URDF has no "chewie_fts"; the resolved Bota LAX
+# triplet frame is "chewie_fts_combined". audit_joint is the URDF fixed joint that the
+# validation model re-opens so RNEA reports the transmitted wrench directly.
+FTS_FRAMES = {
+    "han_fts": {
+        "audit_joint": "han_fts_joint",
+        "hardware": "ATI Omega191",
+    },
+    "chewie_fts_combined": {
+        "audit_joint": "chewie_bota_lax_triplet_mount_to_fts_joint",
+        "hardware": "Bota LAX triplet (resolved)",
+    },
+}
+
+WRENCH_COMPONENTS = ("fx", "fy", "fz", "tx", "ty", "tz")
+WRENCH_SIGNS = ("mount_on_arm", "arm_on_mount")
+WRENCH_AXES = ("local", "world_aligned")
+
 
 def _joint_label(joint_name):
     return joint_name.replace("han_", "").replace("chewie_", "").replace("_joint", "")
@@ -91,6 +110,12 @@ def parse_args(argv=None):
         type=str,
         default=None,
         help="Batch output root; each mass writes to {batch-dir}/mass_{kg}kg/",
+    )
+    parser.add_argument(
+        "--no-validate-wrench",
+        dest="validate_wrench",
+        action="store_false",
+        help="Skip the FTS wrench cross-check against an independently built model",
     )
     args = parser.parse_args(argv)
     if args.mass_kg is None:
@@ -126,10 +151,12 @@ def parse_urdf_joint_limits(urdf_path, joint_names):
         limit = joint.find("limit")
         if limit is None:
             continue
+        effort = limit.get("effort")
         limits[name] = {
             "lower": float(limit.get("lower")),
             "upper": float(limit.get("upper")),
             "velocity": float(limit.get("velocity")),
+            "effort": None if effort is None else float(effort),
         }
     return limits
 
@@ -156,7 +183,7 @@ def parse_armed_mockup_inertial(urdf_path):
     return None
 
 
-def patch_urdf_for_load(mass_kg=None):
+def patched_urdf_text(mass_kg=None):
     """Patch sim_chaser.urdf: fix slide joint, optionally scale armed_mockup mass/inertia."""
     urdf_text = open(URDF_PATH).read()
     urdf_text = urdf_text.replace(
@@ -182,8 +209,12 @@ def patch_urdf_for_load(mass_kg=None):
             break
         urdf_text = ET.tostring(root, encoding="unicode")
 
+    return urdf_text
+
+
+def patch_urdf_for_load(mass_kg=None):
     with tempfile.NamedTemporaryFile(suffix=".urdf", mode="w", delete=False) as tmp:
-        tmp.write(urdf_text)
+        tmp.write(patched_urdf_text(mass_kg))
         return tmp.name
 
 
@@ -194,6 +225,126 @@ def load_model(mass_kg=None):
     )
     model.gravity.linear[:] = 0.0
     return model, collision_model, visual_model, urdf_load_path
+
+
+def build_audit_model(mass_kg=None):
+    """Same robot, but with the FTS fixed joints re-opened as revolute joints locked at zero.
+
+    Used only to cross-check the wrench: with a real joint at the sensor, RNEA reports the
+    transmitted wrench directly in data.f, independent of the frame-tree bookkeeping below.
+    """
+    root = ET.fromstring(patched_urdf_text(mass_kg))
+    audit_joints = {spec["audit_joint"] for spec in FTS_FRAMES.values()}
+    found = set()
+    for joint in root.findall("joint"):
+        name = joint.get("name")
+        if name not in audit_joints:
+            continue
+        joint.set("type", "revolute")
+        ET.SubElement(joint, "axis", {"xyz": "0 0 1"})
+        ET.SubElement(
+            joint,
+            "limit",
+            {"effort": "0", "lower": "0", "upper": "0", "velocity": "0"},
+        )
+        found.add(name)
+    missing = audit_joints - found
+    if missing:
+        raise RuntimeError(f"audit joints not found in URDF: {sorted(missing)}")
+
+    model = pinocchio.buildModelFromXML(
+        ET.tostring(root, encoding="unicode"), JointModelFreeFlyer()
+    )
+    model.gravity.linear[:] = 0.0
+    return model
+
+
+def _frame_ancestors(model, frame_id):
+    ancestors = []
+    current = frame_id
+    while True:
+        parent = model.frames[current].parentFrame
+        if parent == current:
+            break
+        ancestors.append(parent)
+        current = parent
+        if current == 0:
+            break
+    return ancestors
+
+
+def build_wrench_probe(model, frame_name):
+    """Precompute the constant terms needed to cut the model open at a fixed-joint frame.
+
+    Pinocchio merges fixed joints, so both arms hang directly off the free-flyer root joint.
+    pinocchio.computeSupportedForceByFrame() sums every direct child joint of that root and
+    would report Han's wrench contaminated by Chewie's arm, so the child joints are instead
+    filtered by the frame tree.
+    """
+    frame_id = model.getFrameId(frame_name)
+    frame = model.frames[frame_id]
+    joint_id = frame.parentJoint
+
+    # Bodies welded to the frame: walk forward through frames whose parentFrame chain
+    # already lands inside the set. Their composite inertia never changes.
+    welded_frames = {frame_id}
+    inertia = frame.placement.act(frame.inertia)
+    welded_mass = frame.inertia.mass
+    for idx in range(frame_id + 1, model.nframes):
+        candidate = model.frames[idx]
+        if candidate.parentJoint != joint_id:
+            continue
+        if candidate.parentFrame not in welded_frames:
+            continue
+        welded_frames.add(idx)
+        inertia += candidate.placement.act(candidate.inertia)
+        welded_mass += candidate.inertia.mass
+
+    child_joints = [
+        jid
+        for jid in range(1, model.njoints)
+        if model.parents[jid] == joint_id
+        and frame_id in _frame_ancestors(model, model.getFrameId(model.names[jid]))
+    ]
+    distal_mass = welded_mass + sum(
+        model.inertias[sub].mass for jid in child_joints for sub in model.subtrees[jid]
+    )
+
+    return {
+        "name": frame_name,
+        "audit_joint": FTS_FRAMES[frame_name]["audit_joint"],
+        "hardware": FTS_FRAMES[frame_name]["hardware"],
+        "frame_id": frame_id,
+        "joint_id": joint_id,
+        "inertia": frame.placement.actInv(inertia),
+        "child_joints": child_joints,
+        "distal_mass": distal_mass,
+        "placement": frame.placement.copy(),
+    }
+
+
+def probe_placement(model, data, probe):
+    return data.oMi[probe["joint_id"]] * model.frames[probe["frame_id"]].placement
+
+
+def frame_subtree_wrench(model, data, probe):
+    """Spatial force transmitted from the mount into everything distal of the probe frame.
+
+    Caller must have run pinocchio.forwardKinematics(model, data, q, v, a) and then
+    pinocchio.rnea(model, data, q, v, a): rnea leaves data.a untouched, so without the
+    forward pass the acceleration term silently evaluates to zero.
+    """
+    frame = model.frames[probe["frame_id"]]
+    inertia = probe["inertia"]
+    v = pinocchio.getFrameVelocity(model, data, probe["frame_id"], pinocchio.LOCAL)
+    a = pinocchio.getFrameAcceleration(model, data, probe["frame_id"], pinocchio.LOCAL)
+    oMf = probe_placement(model, data, probe)
+
+    force = inertia * (a - oMf.actInv(model.gravity)) + v.cross(inertia * v)
+    force = frame.placement.act(force)
+    for jid in probe["child_joints"]:
+        force += data.liMi[jid].act(data.f[jid])
+    return frame.placement.actInv(force)
 
 
 def _initial_configuration(model):
@@ -380,6 +531,71 @@ def solve_reach(problem_setup, warm_xs=None, warm_us=None, verbose=True):
     return solver
 
 
+def solution_accelerations(us, nv, n_nodes):
+    """DifferentialActionModelFreeInvDynamics uses the control as the joint acceleration
+    (nu == state.nv and xout == u), so us[k] is a_k.
+
+    The trajectory has one more state than control, so the terminal node has no command.
+    It repeats the last commanded acceleration: vStop makes the terminal deceleration
+    large, and zero-filling instead would drop the terminal wrench discontinuously to zero
+    and read as a data glitch rather than the zero-order hold it is.
+    """
+    accelerations = [np.asarray(u, dtype=float).copy() for u in us]
+    if not accelerations:
+        return [np.zeros(nv) for _ in range(n_nodes)]
+    while len(accelerations) < n_nodes:
+        accelerations.append(accelerations[-1].copy())
+    return accelerations[:n_nodes]
+
+
+def validate_wrench(model, probes, xs, accelerations, mass_kg):
+    """Cross-check frame_subtree_wrench() against a model with real joints at the sensors.
+
+    Returns the largest absolute wrench disagreement over the trajectory, alongside the
+    largest wrench magnitude seen, so the caller can report an absolute and relative bound.
+    """
+    audit = build_audit_model(mass_kg)
+    audit_data = audit.createData()
+    audit_joints = {p["name"]: audit.getJointId(p["audit_joint"]) for p in probes}
+    joint_map = [
+        (model.joints[jid], audit.joints[audit.getJointId(model.names[jid])])
+        for jid in range(2, model.njoints)
+    ]
+
+    data = model.createData()
+    q_audit = pinocchio.neutral(audit)
+    v_audit = np.zeros(audit.nv)
+    a_audit = np.zeros(audit.nv)
+
+    max_error = 0.0
+    max_magnitude = 0.0
+    for x, a in zip(xs, accelerations):
+        q = x[: model.nq]
+        v = x[model.nq :]
+        pinocchio.forwardKinematics(model, data, q, v, a)
+        pinocchio.rnea(model, data, q, v, a)
+
+        q_audit[:7] = q[:7]
+        v_audit[:6] = v[:6]
+        a_audit[:6] = a[:6]
+        for joint, audit_joint in joint_map:
+            q_audit[audit_joint.idx_q] = q[joint.idx_q]
+            v_audit[audit_joint.idx_v] = v[joint.idx_v]
+            a_audit[audit_joint.idx_v] = a[joint.idx_v]
+        pinocchio.forwardKinematics(audit, audit_data, q_audit, v_audit, a_audit)
+        pinocchio.rnea(audit, audit_data, q_audit, v_audit, a_audit)
+
+        for probe in probes:
+            mine = frame_subtree_wrench(model, data, probe)
+            reference = audit_data.f[audit_joints[probe["name"]]]
+            expected = np.concatenate([reference.linear, reference.angular])
+            actual = np.concatenate([mine.linear, mine.angular])
+            max_error = max(max_error, np.abs(actual - expected).max())
+            max_magnitude = max(max_magnitude, np.abs(expected).max())
+
+    return max_error, max_magnitude
+
+
 def print_solution_summary(solver, model, data, problem_setup):
     q0 = problem_setup["q0"]
     ee_frame_id = problem_setup["ee_frame_id"]
@@ -405,10 +621,14 @@ def print_solution_summary(solver, model, data, problem_setup):
     )
 
 
-def _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal):
+def _extract_trajectory_data(xs, us, model, data, dt, ee_frame_id, ee_goal, probes):
     times = np.arange(len(xs)) * dt
+    accelerations = solution_accelerations(us, model.nv, len(xs))
     positions = {name: [] for name in ARM_INIT_POS}
     velocities = {name: [] for name in ARM_INIT_POS}
+    torques = {name: [] for name in ARM_INIT_POS}
+    wrenches = {probe["name"]: {axes: [] for axes in WRENCH_AXES} for probe in probes}
+    base_residual = []
     ee_errors = []
     ee_pos = []
     base_rpy = []
@@ -417,17 +637,34 @@ def _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal):
     base_lin_vel = []
     com_pos = []
 
-    for x in xs:
+    for x, a in zip(xs, accelerations):
         q = x[: model.nq]
         v = x[model.nq :]
+
+        pinocchio.centerOfMass(model, data, q)
+        pinocchio.forwardKinematics(model, data, q, v, a)
+        tau = pinocchio.rnea(model, data, q, v, a)
+        pinocchio.updateFramePlacement(model, data, ee_frame_id)
+
         for joint_name in ARM_INIT_POS:
             jid = model.getJointId(joint_name)
             positions[joint_name].append(q[model.joints[jid].idx_q])
             velocities[joint_name].append(v[model.joints[jid].idx_v])
+            torques[joint_name].append(tau[model.joints[jid].idx_v])
+        # The floating base is unactuated, so these six entries are a residual the solver
+        # already constrains to zero; carrying them out makes that check auditable.
+        base_residual.append(tau[:6].copy())
 
-        pinocchio.forwardKinematics(model, data, q)
-        pinocchio.centerOfMass(model, data, q)
-        pinocchio.updateFramePlacement(model, data, ee_frame_id)
+        for probe in probes:
+            force = frame_subtree_wrench(model, data, probe)
+            rotation = probe_placement(model, data, probe).rotation
+            wrenches[probe["name"]]["local"].append(
+                np.concatenate([force.linear, force.angular])
+            )
+            wrenches[probe["name"]]["world_aligned"].append(
+                np.concatenate([rotation @ force.linear, rotation @ force.angular])
+            )
+
         ee_position = data.oMf[ee_frame_id].translation.copy()
         ee_errors.append(np.linalg.norm(ee_position - ee_goal))
         ee_pos.append(ee_position)
@@ -443,6 +680,13 @@ def _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal):
         "times": times,
         "positions": {name: np.asarray(vals) for name, vals in positions.items()},
         "velocities": {name: np.asarray(vals) for name, vals in velocities.items()},
+        "torques": {name: np.asarray(vals) for name, vals in torques.items()},
+        "wrenches": {
+            name: {axes: np.asarray(vals) for axes, vals in per_axes.items()}
+            for name, per_axes in wrenches.items()
+        },
+        "base_residual": np.asarray(base_residual),
+        "n_controls": len(us),
         "ee_errors": np.asarray(ee_errors),
         "ee_pos": np.asarray(ee_pos),
         "base_rpy": np.asarray(base_rpy),
@@ -510,6 +754,24 @@ def _save_sim_parameters(out_dir, urdf_path, sim_params):
     else:
         lines.append("- armed_mockup inertial not found in URDF")
         lines.append("")
+
+    lines.extend(_fts_convention_lines(sim_params))
+    for probe in sim_params.get("fts_probes", []):
+        csv_rows.append(("fts_frame", f"{probe['name']}_distal_mass_kg", probe["distal_mass"]))
+        csv_rows.append(
+            ("fts_frame", f"{probe['name']}_origin_m", probe["origin_in_base"])
+        )
+    if "base_residual_max" in sim_params:
+        csv_rows.append(
+            ("validation", "base_residual_max", sim_params["base_residual_max"])
+        )
+    if sim_params.get("wrench_audit_max_error") is not None:
+        csv_rows.append(
+            ("validation", "wrench_audit_max_error", sim_params["wrench_audit_max_error"])
+        )
+        csv_rows.append(
+            ("validation", "wrench_max_magnitude", sim_params["wrench_max_magnitude"])
+        )
 
     lines.extend(
         [
@@ -586,6 +848,61 @@ def _save_sim_parameters(out_dir, urdf_path, sim_params):
     print(f"Saved sim parameters to {os.path.abspath(md_path)}")
 
 
+def _fts_convention_lines(sim_params):
+    probes = sim_params.get("fts_probes", [])
+    lines = [
+        "## Force/torque sensor wrench",
+        "",
+        "Each sensor frame sits between the optical plate and the arm tombstone, so it",
+        "carries the whole arm above it. Gravity is zero in the model, so the reported",
+        "wrench is purely motion-induced and is directly comparable to a",
+        "gravity-compensated hardware measurement. The final sample repeats the last",
+        "commanded acceleration, since there is one more state than control.",
+        "",
+        "| frame | hardware | distal mass [kg] | origin in base frame [m] |",
+        "| --- | --- | ---: | --- |",
+    ]
+    for probe in probes:
+        origin = np.array2string(probe["origin_in_base"], separator=" ")
+        lines.append(
+            f"| `{probe['name']}` | {probe['hardware']} | "
+            f"{probe['distal_mass']:.4f} | {origin} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "### Column conventions in `<frame>_wrench.csv`",
+            "",
+            "- Torques are taken about the origin of the named frame.",
+            "- `local`: components in the sensor frame's own axes.",
+            "- `world_aligned`: same origin, components rotated into the inertial frame.",
+            "- `mount_on_arm`: force the mount/table side applies to the arm assembly",
+            "  (Pinocchio/RNEA convention).",
+            "- `arm_on_mount`: the reaction, i.e. what the arm pushes into the sensor.",
+            "  Equal to `-mount_on_arm`.",
+            "",
+            "### Validation",
+            "",
+        ]
+    )
+    if "base_residual_max" in sim_params:
+        lines.append(
+            "- max |unactuated floating-base residual| over the commanded nodes: "
+            f"{sim_params['base_residual_max']:.3e} (N and N m; should be ~0). The"
+            " terminal node in `validation.csv` is flagged `commanded=0` because it"
+            " extrapolates the last command and is not constrained by the solver."
+        )
+    if sim_params.get("wrench_audit_max_error") is not None:
+        lines.append(
+            "- max wrench disagreement against an independent model with real joints at "
+            f"the sensors: {sim_params['wrench_audit_max_error']:.3e} "
+            f"against a peak magnitude of {sim_params['wrench_max_magnitude']:.3f}"
+        )
+    lines.append("")
+    return lines
+
+
 def _plot_joint_limits(ax, joint_name, limits, kind):
     if joint_name not in limits:
         return
@@ -606,9 +923,11 @@ def _plot_joint_limits(ax, joint_name, limits, kind):
             alpha=0.8,
         )
     else:
-        vlim = limits[joint_name]["velocity"]
-        ax.axhline(vlim, color="gray", ls="--", lw=1, alpha=0.8, label="limit")
-        ax.axhline(-vlim, color="gray", ls="--", lw=1, alpha=0.8)
+        bound = limits[joint_name]["velocity" if kind == "velocity" else "effort"]
+        if bound is None:
+            return
+        ax.axhline(bound, color="gray", ls="--", lw=1, alpha=0.8, label="limit")
+        ax.axhline(-bound, color="gray", ls="--", lw=1, alpha=0.8)
 
 
 def _save_arm_joint_figure(out_dir, traj, limits, arm_name, joint_names, color, linestyle):
@@ -629,17 +948,25 @@ def _save_arm_joint_figure(out_dir, traj, limits, arm_name, joint_names, color, 
         right=0.98,
     )
 
+    torques = traj["torques"]
+
     csv_columns = ["time_s"]
     csv_rows = []
     for k, time_s in enumerate(times):
         row = [time_s]
         for joint_name in joint_names:
-            row.extend([positions[joint_name][k], velocities[joint_name][k]])
+            row.extend(
+                [
+                    positions[joint_name][k],
+                    velocities[joint_name][k],
+                    torques[joint_name][k],
+                ]
+            )
         csv_rows.append(row)
 
     for joint_idx, joint_name in enumerate(joint_names):
         label = _joint_label(joint_name)
-        csv_columns.extend([f"{label}_pos", f"{label}_vel"])
+        csv_columns.extend([f"{label}_pos", f"{label}_vel", f"{label}_tau"])
 
         pos_row, pos_col = divmod(joint_idx, 4)
         pos_ax = fig.add_subplot(gs[pos_row, pos_col])
@@ -686,6 +1013,44 @@ def _save_arm_joint_figure(out_dir, traj, limits, arm_name, joint_names, color, 
         os.path.join(out_dir, f"{arm_name}_joints.png"), dpi=150, bbox_inches="tight"
     )
     _write_csv(os.path.join(out_dir, f"{arm_name}_joints.csv"), csv_columns, csv_rows)
+    plt.close(fig)
+
+
+def _save_arm_torque_figure(out_dir, traj, limits, arm_name, joint_names, color):
+    times = traj["times"]
+    torques = traj["torques"]
+
+    fig, axes = plt.subplots(2, 4, figsize=(16, 7), sharex=True)
+    for joint_idx, joint_name in enumerate(joint_names):
+        ax = axes[divmod(joint_idx, 4)]
+        label = _joint_label(joint_name)
+        ax.plot(times, torques[joint_name], color=color, label=arm_name)
+
+        peak = float(np.abs(torques[joint_name]).max())
+        effort = limits.get(joint_name, {}).get("effort")
+        title = label
+        if effort:
+            # In zero gravity the efforts are orders of magnitude below the UR20 limits, so
+            # drawing the limit lines would flatten the trace; report utilization instead.
+            title = f"{label}\npeak {peak:.2f}, {100.0 * peak / effort:.1f}% of limit"
+            if peak > 0.25 * effort:
+                _plot_joint_limits(ax, joint_name, limits, "effort")
+        ax.set_title(title, fontsize=10)
+        ax.grid(True, alpha=0.3)
+        if joint_idx >= 4:
+            ax.set_xlabel("time [s]")
+        if joint_idx == 0:
+            ax.legend(loc="upper right", fontsize=7)
+
+    fig.suptitle(
+        f"{arm_name} joint effort (N m for revolute joints, N for the prismatic fingers)",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(out_dir, f"{arm_name}_torques.png"), dpi=150, bbox_inches="tight"
+    )
     plt.close(fig)
 
 
@@ -855,17 +1220,112 @@ def _save_com_ee_figure(out_dir, traj, ee_goal, ee_frame_name):
     plt.close(fig)
 
 
+def _wrench_signed(traj, frame_name, sign, axes):
+    wrench = traj["wrenches"][frame_name][axes]
+    return wrench if sign == "mount_on_arm" else -wrench
+
+
+def _save_fts_wrench_outputs(out_dir, traj, probes):
+    times = traj["times"]
+
+    csv_columns = ["time_s"]
+    for sign in WRENCH_SIGNS:
+        for axes in WRENCH_AXES:
+            csv_columns.extend(f"{sign}_{axes}_{comp}" for comp in WRENCH_COMPONENTS)
+
+    for probe in probes:
+        blocks = [
+            _wrench_signed(traj, probe["name"], sign, axes)
+            for sign in WRENCH_SIGNS
+            for axes in WRENCH_AXES
+        ]
+        csv_rows = [
+            [time_s, *(value for block in blocks for value in block[k])]
+            for k, time_s in enumerate(times)
+        ]
+        _write_csv(
+            os.path.join(out_dir, f"{probe['name']}_wrench.csv"), csv_columns, csv_rows
+        )
+
+    fig, axes_grid = plt.subplots(
+        2, len(probes), figsize=(7 * len(probes), 8), sharex=True, squeeze=False
+    )
+    for col, probe in enumerate(probes):
+        wrench = _wrench_signed(traj, probe["name"], "arm_on_mount", "local")
+        force_ax = axes_grid[0, col]
+        torque_ax = axes_grid[1, col]
+        for i, comp in enumerate(("fx", "fy", "fz")):
+            force_ax.plot(times, wrench[:, i], label=comp)
+        for i, comp in enumerate(("tx", "ty", "tz")):
+            torque_ax.plot(times, wrench[:, 3 + i], label=comp)
+        force_ax.set_title(
+            f"{probe['name']} force [N]\n{probe['hardware']}, "
+            f"{probe['distal_mass']:.1f} kg distal"
+        )
+        force_ax.set_ylabel("force [N]")
+        torque_ax.set_title(f"{probe['name']} torque [N m]")
+        torque_ax.set_ylabel("torque [N m]")
+        torque_ax.set_xlabel("time [s]")
+        for ax in (force_ax, torque_ax):
+            ax.grid(True, alpha=0.3)
+            ax.legend(ncol=3, fontsize=8)
+
+    fig.suptitle(
+        "Motion-induced wrench at the FTS mounts (arm on mount, sensor frame axes, zero gravity)",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "fts_wrench.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_validation_csv(out_dir, traj):
+    residual = traj["base_residual"]
+    n_controls = traj["n_controls"]
+    columns = (
+        ["time_s"]
+        + [f"base_residual_{comp}" for comp in WRENCH_COMPONENTS]
+        + ["commanded"]
+    )
+    rows = [
+        [t, *residual[k], 1 if k < n_controls else 0]
+        for k, t in enumerate(traj["times"])
+    ]
+    _write_csv(os.path.join(out_dir, "validation.csv"), columns, rows)
+    # Only the commanded nodes carry the solver's unactuated-base equality constraint; the
+    # terminal node extrapolates the last command, so its residual is meaningless here.
+    return np.abs(residual[:n_controls]).max()
+
+
 def save_rss_reach_outputs(
-    xs, model, data, dt, ee_frame_id, ee_goal, q_ref, urdf_path, out_dir, sim_params
+    xs,
+    us,
+    model,
+    data,
+    dt,
+    ee_frame_id,
+    ee_goal,
+    q_ref,
+    urdf_path,
+    out_dir,
+    sim_params,
+    probes,
 ):
-    traj = _extract_trajectory_data(xs, model, data, dt, ee_frame_id, ee_goal)
+    traj = _extract_trajectory_data(
+        xs, us, model, data, dt, ee_frame_id, ee_goal, probes
+    )
     limits = parse_urdf_joint_limits(URDF_PATH, list(ARM_INIT_POS.keys()))
     _save_arm_joint_figure(out_dir, traj, limits, "han", HAN_JOINTS, "tab:blue", "-")
     _save_arm_joint_figure(
         out_dir, traj, limits, "chewie", CHEWIE_JOINTS, "tab:red", "-"
     )
+    _save_arm_torque_figure(out_dir, traj, limits, "han", HAN_JOINTS, "tab:blue")
+    _save_arm_torque_figure(out_dir, traj, limits, "chewie", CHEWIE_JOINTS, "tab:red")
     _save_base_figure(out_dir, traj, q_ref)
     _save_com_ee_figure(out_dir, traj, ee_goal, sim_params["ee_frame"])
+    _save_fts_wrench_outputs(out_dir, traj, probes)
+    sim_params["base_residual_max"] = _save_validation_csv(out_dir, traj)
     _save_sim_parameters(out_dir, urdf_path, sim_params)
     print(f"Saved figures and CSVs to {os.path.abspath(out_dir)}")
 
@@ -938,7 +1398,7 @@ def write_batch_readme(batch_root, mass_dirs):
     lines = [
         "# RSS reach trajectories — mass sweep",
         "",
-        "Generated by `scripts/rss_reach.py` (Phase 1).",
+        "Generated by `scripts/rss_reach.py`.",
         "",
         "## Mass variants",
         "",
@@ -950,12 +1410,37 @@ def write_batch_readme(batch_root, mass_dirs):
         "",
         "| File | Description |",
         "| --- | --- |",
-        "| `han_joints.csv` | Han arm joint position/velocity commands [rad, rad/s] |",
-        "| `chewie_joints.csv` | Chewie arm joint position/velocity commands |",
+        "| `han_joints.csv` | Han arm joint position/velocity/effort commands [rad, rad/s, N m] |",
+        "| `chewie_joints.csv` | Chewie arm joint position/velocity/effort commands |",
+        "| `han_fts_wrench.csv` | Predicted wrench at `han_fts` (ATI Omega191 mount) |",
+        "| `chewie_fts_combined_wrench.csv` | Predicted wrench at `chewie_fts_combined` (Bota LAX triplet) |",
         "| `base_motion.csv` | Expected platform position, linear vel, RPY, angular vel |",
         "| `com_ee_tracking.csv` | COM, EE position, EE tracking error |",
-        "| `sim_parameters.md` | Problem setup, mass/inertia, cost weights |",
+        "| `validation.csv` | Unactuated floating-base residual per timestep (~0 where `commanded=1`) |",
+        "| `sim_parameters.md` | Problem setup, mass/inertia, cost weights, wrench conventions |",
+        "| `fts_wrench.png`, `*_torques.png` | Wrench and joint effort plots |",
         "| `rss_reach.mp4` | Meshcat animation (when run with `video`) |",
+        "",
+        "## Wrench conventions",
+        "",
+        "`han_fts` and `chewie_fts_combined` sit between the optical plate and the arm",
+        "tombstone, so each carries its entire arm — this is what the mount force/torque",
+        "sensors physically measure. The URDF has no `chewie_fts` link; the resolved Bota",
+        "LAX triplet frame is `chewie_fts_combined`.",
+        "",
+        "Gravity is zero in the model, so these wrenches are purely motion-induced and",
+        "line up with a gravity-compensated hardware measurement.",
+        "",
+        "Every `*_wrench.csv` carries the same wrench four ways, so no sign or frame",
+        "convention has to be guessed:",
+        "",
+        "- `mount_on_arm_*`: force the mount/table applies to the arm assembly.",
+        "- `arm_on_mount_*`: the reaction, what the arm pushes into the sensor (`= -mount_on_arm`).",
+        "- `*_local_*`: components in the sensor frame's own axes.",
+        "- `*_world_aligned_*`: same origin, components rotated into the inertial frame.",
+        "",
+        "Torques are taken about the sensor frame origin. The trajectory has one more state",
+        "than control, so the final row repeats the last commanded acceleration.",
         "",
         "## Folders",
         "",
@@ -963,10 +1448,19 @@ def write_batch_readme(batch_root, mass_dirs):
     for mass_kg, out_dir in mass_dirs:
         rel = os.path.relpath(out_dir, batch_root)
         lines.append(f"- `{rel}/` — {mass_kg:g} kg")
+
+    masses = " ".join(f"{mass_kg:g}" for mass_kg, _ in mass_dirs)
     lines.extend(
         [
             "",
-            "FTS wrench predictions will follow in Phase 2.",
+            "## Regenerating",
+            "",
+            "```bash",
+            f"python scripts/rss_reach.py plot --mass-kg {masses} \\",
+            f"    --batch-dir {os.path.basename(batch_root)}",
+            "```",
+            "",
+            "Add `video` to also render a Meshcat animation per mass.",
             "",
         ]
     )
@@ -984,6 +1478,7 @@ def run_single_mass(
     warm_xs=None,
     warm_us=None,
     verbose=True,
+    validate_wrench_flag=True,
 ):
     print(f"\n{'=' * 60}")
     print(f"Solving reach trajectory: armed_mockup mass = {mass_kg:g} kg")
@@ -995,9 +1490,36 @@ def run_single_mass(
     solver = solve_reach(problem_setup, warm_xs, warm_us, verbose=verbose)
     print_solution_summary(solver, model, problem_setup["data"], problem_setup)
 
+    probes = [build_wrench_probe(model, name) for name in FTS_FRAMES]
+    sim_params = problem_setup["sim_params"]
+    sim_params["fts_probes"] = [
+        {
+            "name": probe["name"],
+            "hardware": probe["hardware"],
+            "distal_mass": probe["distal_mass"],
+            "origin_in_base": probe["placement"].translation.copy(),
+        }
+        for probe in probes
+    ]
+    sim_params["wrench_audit_max_error"] = None
+    sim_params["wrench_max_magnitude"] = None
+
+    if validate_wrench_flag:
+        accelerations = solution_accelerations(solver.us, model.nv, len(solver.xs))
+        max_error, max_magnitude = validate_wrench(
+            model, probes, solver.xs, accelerations, mass_kg
+        )
+        sim_params["wrench_audit_max_error"] = max_error
+        sim_params["wrench_max_magnitude"] = max_magnitude
+        print(
+            f"Wrench cross-check vs independent model: max error {max_error:.3e} "
+            f"(peak wrench magnitude {max_magnitude:.3f})"
+        )
+
     if with_plot:
         save_rss_reach_outputs(
             solver.xs,
+            solver.us,
             model,
             problem_setup["data"],
             problem_setup["dt"],
@@ -1006,7 +1528,8 @@ def run_single_mass(
             q0,
             urdf_load_path,
             out_dir,
-            problem_setup["sim_params"],
+            sim_params,
+            probes,
         )
 
     if with_display or with_video:
@@ -1075,6 +1598,7 @@ def main(argv=None):
             warm_xs=warm_xs,
             warm_us=warm_us,
             verbose=(idx == 0),
+            validate_wrench_flag=args.validate_wrench,
         )
         warm_xs = solver.xs
         warm_us = solver.us

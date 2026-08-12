@@ -1,7 +1,6 @@
 *.vscode 
 crocoddyl/
 hcrl_crab_robot/
-output/
 *.mp4 
 
 *.cursor 
