@@ -10,4 +10,8 @@ dependencies:
   - pip 
   - pip: 
     - meshcat
-    - gitman 
+    - gitman
+    - scipy
+    - cvxpy
+    - mcap
+    - mcap-ros2-support 
