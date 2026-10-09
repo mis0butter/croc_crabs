@@ -1,7 +1,7 @@
 # croc_crabs
 
 ## Current state
-_Last updated 2026-09-29. Rewrite this block in place at the end of every session._
+_Last updated 2026-10-08. Rewrite this block in place at the end of every session._
 
 - **Active task:** system ID of the RSS arms' inertial parameters from base F/T sensors (`sysid/`). Goal: have the pipeline ready before the hardware team finishes calibrating the F/T sensors and the Stewart-platform gravity compensation.
 - **Done:** `.mcap` extraction, arm model rooted at the F/T frame, wrench regressor, physically-consistent fit, synthetic end-to-end test.
@@ -10,6 +10,7 @@ _Last updated 2026-09-29. Rewrite this block in place at the end of every sessio
 - **Best numbers (synthetic, held-out RMS, worst axis):** static poses + 30 s random Fourier excitation reach the noise floor (chewie 0.51 N / 0.52 N·m; URDF 1.52 N / 5.24 N·m). Static poses alone fix forces but not torques during motion (4.47 N·m).
 - **Identifiability:** rank 52 / 70, whitened condition number ~3.5e4. Individual link masses/COMs are NOT unique (chewie COM errors up to 47 mm despite a perfect wrench fit).
 - **Real data:** 1 run, `junette_0_3000kg_0`. Only chewie moves; han is nearly still; not yet fitted.
+- **Reach prediction vs hardware (2026-10-08, `sysid/plot_reach_vs_mcap.py`):** `rss_reach.py --mass-kg 3000` against `junette_0_3000kg_0`. Joints track the plan (≤ 3 mrad). The platform moves ~3–4× more than the simulated base in x/y/roll/pitch and ~6× less in yaw. chewie's `dyn_input_wrench` during the motion resembles the simulated zero-g sensor wrench (r ≈ 0.95 on fz, ty, tz, sign `arm_on_mount`), so it may contain the arm's inertial reaction rather than only model error. One run; unconfirmed. Plots: `output/2026-10-08_reach_vs_junette_0_3000kg_0/`.
 - **Blocked on the collaborator:**
   - raw F/T topics (none are recorded yet)
   - which platform pose is the physical one (`/rss/slide_platform_state` or the hexapod `/tf`)
@@ -30,7 +31,7 @@ Two UR20 arms (han, chewie) are mounted on a hexapod that emulates a free-floati
 Repo map:
 - `scripts/`: Crocoddyl planning. `rss_reach.py` is what runs on the hardware.
 - `rss_platform/`: a **separate git repo (gitman)** with `sim_chaser.urdf`, the diagram `sim_chaser_diagram.drawio`, and hardware logs `mcap_data/<run>/<run>.mcap`.
-- `sysid/`: pipeline `extract_mcap.py` → **[missing: `fit_hardware.py`]** → `arm_model` / `preprocess` / `identify`. `test_synthetic.py` runs the pipeline end to end; its `rows()` is the preprocessing template for hardware.
+- `sysid/`: pipeline `extract_mcap.py` → **[missing: `fit_hardware.py`]** → `arm_model` / `preprocess` / `identify`. `test_synthetic.py` runs the pipeline end to end; its `rows()` is the preprocessing template for hardware. `plot_reach_vs_mcap.py` plots an extracted log against an `rss_reach.py plot` output directory.
   README figures come from `sysid/figures/make_figures.py` (uses `drawio_lib.py`; writes the editable `figures.drawio` + one SVG per figure). Edit the script and rerun it; don't hand-edit the SVGs.
 
 ## Running
@@ -40,7 +41,7 @@ PY=~/anaconda3/envs/croc_crabs/bin/python        # or: conda activate croc_crabs
 $PY sysid/extract_mcap.py rss_platform/mcap_data/junette_0_3000kg_0/junette_0_3000kg_0.mcap
 $PY sysid/test_synthetic.py --arm chewie [--seed 1] [--plot out.png]    # ~10 s
 ```
-Scratch outputs (plots) go to the session scratchpad, not the repo.
+Scratch outputs (plots) go to the session scratchpad, not the repo. Plots worth keeping go in `output/<date>_<name>/`.
 
 ## Conventions and gotchas
 - **Parameters:** `pi` has 10 per body in Pinocchio order `[m, mcx, mcy, mcz, Ixx, Ixy, Iyy, Ixz, Iyz, Izz]`, with inertia **about the body-frame origin** (not the COM). Bodies are B0…B6. B_i is moved by J_i, the same numbering as the diagram.

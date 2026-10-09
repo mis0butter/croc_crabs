@@ -1,0 +1,40 @@
+section,parameter,value
+problem,control_hz,50
+problem,dt_s,0.02
+problem,horizon_s,5.0
+problem,T,250
+problem,gravity_m_s2,[0. 0. 0.]
+problem,ee_frame,chewie_tool0
+problem,ee_goal_m,[2. 0. 0.]
+armed_mockup_inertial,mass_kg,3000.0
+armed_mockup_inertial,ixx,499.9998
+armed_mockup_inertial,ixy,0.0
+armed_mockup_inertial,ixz,0.0
+armed_mockup_inertial,iyy,499.9998
+armed_mockup_inertial,iyz,0.0
+armed_mockup_inertial,izz,499.9998
+fts_frame,han_fts_arm_mass_kg,72.9217
+fts_frame,han_fts_origin_m,[0.2667 0.2921 0.0894]
+fts_frame,chewie_fts_combined_arm_mass_kg,81.0698
+fts_frame,chewie_fts_combined_origin_m,[ 0.2286 -0.2794  0.0699]
+validation,base_residual_max,1.4740209053343278e-11
+validation,wrench_audit_max_error,3.552713678800501e-15
+validation,wrench_max_magnitude,18.47439110766274
+running_cost,uReg,50.0
+running_cost_description,uReg,"Actuation regularization (WeightedQuad, w_u=0.01 per joint)"
+running_cost,baseRun,10.0
+running_cost_description,baseRun,Track initial base pose and damp base/arm joint velocities
+running_cost,eeRun,10.0
+running_cost_description,eeRun,Running EE position tracking (chewie_tool0)
+running_cost,chewieLiftBarrier,1000.0
+running_cost_description,chewieLiftBarrier,One-sided barrier: chewie shoulder_lift >= start angle
+terminal_cost,ee,1000000.0
+terminal_cost_description,ee,Terminal EE position tracking (chewie_tool0)
+terminal_cost,vStop,10000.0
+terminal_cost_description,vStop,Terminal zero velocity (base + all arm joints)
+activation,w_u,0.01
+activation,w_base_position,100.0
+activation,w_base_lin_vel,10.0
+activation,w_base_joint_vel,10.0
+activation,w_term_vel,100.0
+activation,lift_barrier_lower,0.0
