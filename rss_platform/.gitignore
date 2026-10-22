@@ -1,0 +1,17 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# ROS 2 diagnostic outputs (TF frames, etc)
+*.pdf
+*.gv
+
+# IDE and System files
+.vscode/
+.DS_Store
+.cursor/
+
+# Local build artifacts (if they ever appear here)
+build/
+install/
+log/
