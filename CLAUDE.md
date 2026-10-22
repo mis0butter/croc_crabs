@@ -1,7 +1,7 @@
 # croc_crabs
 
 ## Current state
-_Last updated 2026-10-08. Rewrite this block in place at the end of every session._
+_Last updated 2026-10-09. Rewrite this block in place at the end of every session._
 
 - **Active task:** system ID of the RSS arms' inertial parameters from base F/T sensors (`sysid/`). Goal: have the pipeline ready before the hardware team finishes calibrating the F/T sensors and the Stewart-platform gravity compensation.
 - **Done:** `.mcap` extraction, arm model rooted at the F/T frame, wrench regressor, physically-consistent fit, synthetic end-to-end test.
@@ -10,15 +10,24 @@ _Last updated 2026-10-08. Rewrite this block in place at the end of every sessio
 - **Best numbers (synthetic, held-out RMS, worst axis):** static poses + 30 s random Fourier excitation reach the noise floor (chewie 0.51 N / 0.52 N·m; URDF 1.52 N / 5.24 N·m). Static poses alone fix forces but not torques during motion (4.47 N·m).
 - **Identifiability:** rank 52 / 70, whitened condition number ~3.5e4. Individual link masses/COMs are NOT unique (chewie COM errors up to 47 mm despite a perfect wrench fit).
 - **Real data:** 1 run, `junette_0_3000kg_0`. Only chewie moves; han is nearly still; not yet fitted.
-- **Reach prediction vs hardware (2026-10-08, `sysid/plot_reach_vs_mcap.py`):** `rss_reach.py --mass-kg 3000` against `junette_0_3000kg_0`. Joints track the plan (≤ 3 mrad). The platform moves ~3–4× more than the simulated base in x/y/roll/pitch and ~6× less in yaw. chewie's `dyn_input_wrench` during the motion resembles the simulated zero-g sensor wrench (r ≈ 0.95 on fz, ty, tz, sign `arm_on_mount`), so it may contain the arm's inertial reaction rather than only model error. One run; unconfirmed. Plots: `output/2026-10-08_reach_vs_junette_0_3000kg_0/`.
+- **Reach prediction vs hardware (`rss_reach.py --mass-kg 3000` vs `junette_0_3000kg_0`; one run):** planner outputs and the hardware log now sit together in `rss_platform/mcap_data/mass_3000kg/`; comparison plots in `rss_platform/2026-10-08_reach_vs_junette_0_3000kg_0/` (`sysid/plot_reach_vs_mcap.py`). Joints track the plan (≤ 3 mrad).
+  - The platform's roll/pitch is the double integral of the logged `/rss/slide_dyn_input_wrench` torque (r = 0.99999) with inertia **833 kg·m²** (the URDF's 5000 kg default), not the planner's 500. The base mismatch is inherited from the wrench input; it is not washout or scaling.
+  - Plate x/y (71 / 69 mm) is mostly lever arm: rotation about `slide_simulation_frame`, 0.705 m above the plate. That frame's origin moves ≤ 6 mm.
+  - The base input is not the plain sum of the arm wrenches: components are exactly zero 18–71% of the time (roughly a 7–9 N / 5–7 N·m threshold; exact rule unknown). This removes most of the yaw torque (yaw −0.5° measured vs −3.8° planned).
+  - The measured arm wrenches carry a net impulse over the reach (≈ 8 / −12 / −8 N·m·s; planner ≈ 0), so the base keeps drifting (roll/pitch ≈ ±5° vs 1.5 / −2.2° planned).
+  - `*_dyn_input_wrench` during motion ≈ the arm's inertial reaction + a pose-dependent error (r ≈ 0.95 with the planner's zero-g wrench on chewie fz, ty, tz, sign `arm_on_mount`), so the KDL term is probably gravity-only. Unconfirmed.
+  - After the joints stop (12.96 s) the base coasts at ≈ 1 deg/s, then is ramped to zero by 13.75 s (a commanded stop, not the wrench). With the arm at rest and the sim active, chewie's wrench holds an offset of ≈ (−8, −14) N in fx/fy that steps down to ≈ (−2.4, −1.4) N when the sim switches off at 13.95 s. The fy offset tracks roll (−2 N/deg, r = −0.95). So the compensation differs between sim-active and sim-off. Unconfirmed.
 - **Blocked on the collaborator:**
   - raw F/T topics (none are recorded yet)
-  - which platform pose is the physical one (`/rss/slide_platform_state` or the hexapod `/tf`)
+  - whether the platform pose is before or after washout (`/rss/slide_platform_state` and `/tf` `slide_hexapod_base → slide_hexapod_plate` are identical)
+  - the base inertia used on the hardware for the 3000 kg run (fits 833, not 500)
+  - the threshold/deadband applied to `/rss/slide_dyn_input_wrench`
+  - what changes in the wrench compensation when the sim switches off (both arms step at 13.95 s)
   - the wrench sign convention
   - the KDL chain root
   - what goes into `setInducedAcceleration`
   - the per-link YAML file
-- **Next step:** optimized excitation trajectories (minimize the regressor's condition number, within joint and platform limits); then a sanity-check fit of the before/after rest windows of `junette_0_3000kg_0`.
+- **Next step:** optimized excitation trajectories (minimize the regressor's condition number, within joint and platform limits); then a sanity-check fit of the before/after rest windows of `junette_0_3000kg_0`. Ask the collaborator about the base inertia and the wrench threshold first.
 
 ## Working rules
 - Read `Current state` above at session start. Read `sysid/LOG.md` only for history on a specific task.
@@ -30,15 +39,15 @@ Two UR20 arms (han, chewie) are mounted on a hexapod that emulates a free-floati
 
 Repo map:
 - `scripts/`: Crocoddyl planning. `rss_reach.py` is what runs on the hardware.
-- `rss_platform/`: a **separate git repo (gitman)** with `sim_chaser.urdf`, the diagram `sim_chaser_diagram.drawio`, and hardware logs `mcap_data/<run>/<run>.mcap`.
+- `rss_platform/`: a **separate git repo (gitman)** with `sim_chaser.urdf`, the diagram `sim_chaser_diagram.drawio`, and hardware logs `mcap_data/mass_<kg>kg/<run>.mcap` (next to the planner's CSVs/PNGs for that mass).
 - `sysid/`: pipeline `extract_mcap.py` → **[missing: `fit_hardware.py`]** → `arm_model` / `preprocess` / `identify`. `test_synthetic.py` runs the pipeline end to end; its `rows()` is the preprocessing template for hardware. `plot_reach_vs_mcap.py` plots an extracted log against an `rss_reach.py plot` output directory.
   README figures come from `sysid/figures/make_figures.py` (uses `drawio_lib.py`; writes the editable `figures.drawio` + one SVG per figure). Edit the script and rerun it; don't hand-edit the SVGs.
 
 ## Running
 Run from the repo root with the conda env:
 ```
-PY=~/anaconda3/envs/croc_crabs/bin/python        # or: conda activate croc_crabs
-$PY sysid/extract_mcap.py rss_platform/mcap_data/junette_0_3000kg_0/junette_0_3000kg_0.mcap
+PY=~/miniconda3/envs/croc_crabs/bin/python        # or: conda activate croc_crabs
+$PY sysid/extract_mcap.py rss_platform/mcap_data/mass_3000kg/junette_0_3000kg_0.mcap
 $PY sysid/test_synthetic.py --arm chewie [--seed 1] [--plot out.png]    # ~10 s
 ```
 Scratch outputs (plots) go to the session scratchpad, not the repo. Plots worth keeping go in `output/<date>_<name>/`.
@@ -50,7 +59,7 @@ Scratch outputs (plots) go to the session scratchpad, not the repo. Plots worth 
 - **Joint order:** URDF/model order is J1…J6 = shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3. `/joint_states` publishes elbow first; `extract_mcap.py` reorders.
 - **Do not use the CSV exports** in `mcap_data/<run>/`. The first message fixes the columns, so `han_joint_states.csv` keeps only 2 joints and has no velocity/effort, and there is no chewie file. Always extract from the `.mcap`.
 - **`*_dyn_input_wrench` is not the raw F/T.** It is the F/T minus their KDL arm prediction, tared at the start (~0 N at rest, not ~700 N).
-- **`/rss/slide_platform_state`:** x, y, z are probably metres and roll/pitch/yaw probably **degrees** (they reach ±5.3). Unconfirmed. There is no header stamp; use the log time.
+- **`/rss/slide_platform_state`:** x, y, z in metres, roll/pitch/yaw in **degrees** (matches the `/tf` quaternion of `slide_hexapod_base → slide_hexapod_plate`). It is the pose of the plate, not of the simulation frame. There is no header stamp; use the log time.
 - **Clocks:** header stamps agree with the mcap log time to ≤ 0.1 ms, so the logger clock is used for everything.
 - **Physical consistency:** use `identify.fit_consistent` (pseudo-inertia ⪰ εI per body), not `fit_ols`, for anything written back to the URDF/YAML. Per-link values are one valid representative of the 52 identifiable combinations, not measurements.
 - **Diagram:** the `.drawio` generator script is NOT in the repo; it lived in a session scratchpad. Edit the diagram by hand or ask to recreate the generator.

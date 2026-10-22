@@ -6,6 +6,42 @@ reconstructed from file modification times.
 
 ---
 
+## 2026-10-09 14:45 · `reach-vs-hw-stop` · why the base keeps moving after the joints stop
+**Question:** On the hardware the base moves slightly longer than the joints. Sensor error or gravity-compensation error?
+**Result:**
+- **Timing:** chewie |q̇| < 0.01 rad/s from 12.96 s (creep ends 13.26 s). The platform keeps rotating at ≈ 1.0 / −1.2 deg/s until ≈ 13.3 s, ramps to zero by ≈ 13.75 s; `/rss/slide_dyn_input_wrench` is zeroed at 13.95 s.
+- **The ramp-down is not driven by the wrench.** Deceleration ≈ 2–3 deg/s²; the input torque (−5 N·m on x, ≈ 0 on y, I = 833) gives ≤ 0.35 deg/s². It looks like a commanded stop.
+- **Arm at rest, sim still active (13.75–13.93 s):** chewie measured − planner = (−8.5, −13.8, −1.6) N, (−7.5, 0.4, 2.7) N·m, sd ≤ 0.7.
+- **Same pose and tilt, sim off (14.1–15 s):** (−2.4, −1.4, −1.8) N, (−0.6, 1.8, −0.4) N·m. Han steps at the same instant ((−0.2, 1.2, 0.5) → (−1.8, −0.8, −1.6) N).
+- **Tilt dependence while active:** chewie fy error vs roll: −2.0 N/deg, r = −0.95 (≈ 12 kg equivalent uncompensated mass). fx vs pitch is weaker (r = 0.60).
+**Decision:** Not sensor noise (steady offset, sd < 1 N). Not the static gravity-compensation error alone either: the offset is 4–8× the at-rest residual and disappears in a step when the sim switches off, with nothing moving. Something in the compensation differs between sim-active and sim-off; a tilt-related term is the leading suspect. Unconfirmed, one run.
+**Predicted (next run):** a log with the sim active and the arms held still while the platform is tilted by hand command will show the same fy offset ∝ roll (≈ −2 N/deg on chewie).
+**Artifacts:** none saved (inline analysis).
+
+## 2026-10-09 · `reach-vs-hw-decomp` · hardware log `junette_0_3000kg_0` vs `rss_reach.py --mass-kg 3000`
+**Question:** Joints track the plan, but the wrenches and the base motion do not. Where does the base-motion mismatch come from?
+**Predicted check:** the newest block's prediction (optimized excitation) is not tested by this analysis.
+**Method:** inline analysis of `rss_platform/mcap_data/mass_3000kg/` (hardware `.npz` + planner CSVs). Torques summed about `slide_simulation_frame` (0.705 m above the plate), double-integrated through a rigid body, 5 s horizon, offset 7.96 s.
+**Result (roll / pitch / yaw at the end of the horizon, deg):**
+
+| input → rigid body | roll | pitch | yaw |
+|---|---|---|---|
+| planner `base_motion.csv` | 1.47 | −2.17 | −3.77 |
+| planner wrench, I = 500 | 1.37 | −2.28 | −3.64 |
+| planner wrench, I = 833 | 0.82 | −1.37 | −2.19 |
+| measured arm wrenches (chewie + han), I = 833 | 5.22 | −5.34 | −3.96 |
+| logged `/rss/slide_dyn_input_wrench`, I = 833 | 4.85 | −4.69 | −0.28 |
+| measured platform | 4.87 | −4.67 | −0.52 |
+
+- **The platform does what its input wrench says.** Roll and pitch correlate with the double integral of the logged base torque at r = 0.99999. The fitted inertia is 833 kg·m² (scale 0.600 = 500/833), the URDF's 5000 kg default, not the 500 the planner uses. Yaw fits ~510 but its signal is small (r = 0.98).
+- **Plate x/y is mostly lever arm.** The plate moves 71 / 69 mm, but the simulation-frame origin moves ≤ 6 mm; the rest is rotation about a point 0.705 m above the plate.
+- **`/rss/slide_platform_state` equals `/tf` `slide_hexapod_base → slide_hexapod_plate`**, with roll/pitch/yaw in degrees.
+- **The base input is not the plain sum of the arm wrenches.** Its components are exactly zero 18–71% of the time while active (fx 71%, tz 39%). A per-axis soft threshold of roughly 7–9 N and 5–7 N·m fits the forces (RMS 0.3–0.8 N) but not the torques well (integrates to 2.1 / −3.2° instead of 4.85 / −4.69°), so the exact rule is unknown.
+- **The measured wrench has a net impulse.** Over the 5 s: 8.3 / −11.6 / −8.3 N·m·s and −31 / −28 / −10 N·s, against ≈ 0 for the planner (momentum conserved). The platform was still rotating at ~1 deg/s when it stopped at 13.6 s.
+**Decision:** The base mismatch is inherited from the wrench input (non-reaction offset, thresholding) plus a different base inertia. It is not a washout or scaling problem. `*_dyn_input_wrench` during motion is the arm's inertial reaction plus a pose-dependent error, so the KDL term must be (close to) gravity-only.
+**Predicted (next run):** with the hardware base inertia set to 500 and the same thresholding, roll/pitch scale by 833/500 (to ≈ 8.1 / −7.8° over the horizon) unless the wrench offset is fixed first.
+**Artifacts:** none saved (inline analysis).
+
 ## 2026-09-28 ~20:58 · `synth-v2` · synthetic, seed 1, chewie + han
 **Question:** Correction to `synth-v1`. What can static poses identify on their own, when only at-rest samples are used?
 **Change:** `rows(still_only=True)` for the static run keeps samples with |q̇| < 1e-3 rad/s for ≥ 0.3 s (6625 of 26250).
